@@ -1,4 +1,8 @@
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -68,8 +72,34 @@ def test_dockerignore_is_a_strict_runtime_allowlist():
         "lunit_hackathon/**/*.key",
         "lunit_hackathon/**/*.pem",
         "lunit_hackathon/**/*.p12",
-        "lunit_hackathon/**/[Oo]pen[Aa][Ii]*",
+        "lunit_hackathon/**/[Oo][Pp][Ee][Nn][Aa][Ii]*",
     } <= set(patterns)
+
+
+def test_dockerignore_excludes_uppercase_openai_artifacts_from_the_image(tmp_path):
+    """An all-caps judge-key artifact must not be copyable from the re-included package."""
+    if shutil.which("docker") is None:
+        pytest.skip("Docker is unavailable")
+    if subprocess.run(["docker", "version"], capture_output=True, check=False).returncode != 0:
+        pytest.skip("Docker daemon is unavailable")
+
+    artifact = ROOT / "lunit_hackathon" / "OPENAI_JUDGE_KEY.txt"
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text(
+        "FROM scratch\nCOPY lunit_hackathon/OPENAI_JUDGE_KEY.txt /sentinel\n",
+        encoding="utf-8",
+    )
+    artifact.write_text("not-a-real-secret", encoding="utf-8")
+    try:
+        result = subprocess.run(
+            ["docker", "build", "--no-cache", "-f", str(dockerfile), str(ROOT)],
+            capture_output=True,
+            check=False,
+        )
+    finally:
+        artifact.unlink(missing_ok=True)
+
+    assert result.returncode != 0
 
 
 def test_runtime_requirements_exclude_development_and_openai_dependencies():
