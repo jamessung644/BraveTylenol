@@ -1,4 +1,4 @@
-"""MCP SDK v2 adapter with a small, SDK-free application boundary."""
+"""Optional MCP SDK adapter isolated from the rest of the application."""
 
 import json
 from collections.abc import AsyncIterator, Callable
@@ -9,9 +9,9 @@ import httpx2
 from mcp.client.client import Client
 from mcp.client.streamable_http import streamable_http_client
 
-from harness.config import Settings
-from harness.errors import ConfigurationError, RetrievalError
-from harness.schemas import MCPCallResult, MCPTool
+from lunit_hackathon.config import Settings
+from lunit_hackathon.errors import ConfigurationError, RetrievalError
+from lunit_hackathon.schemas import MCPCallResult, MCPTool
 
 
 class MCPConnectionProtocol(Protocol):
@@ -25,8 +25,6 @@ class MCPClientProtocol(Protocol):
 
 
 class SDKMCPConnection:
-    """Adapts MCP SDK result objects into application-owned schemas."""
-
     def __init__(self, client: Any, max_tool_result_chars: int) -> None:
         self._client = client
         self._max_tool_result_chars = max_tool_result_chars
@@ -34,17 +32,15 @@ class SDKMCPConnection:
     async def list_tools(self) -> list[MCPTool]:
         try:
             result = await self._client.list_tools()
-            return sorted(
-                [
-                    MCPTool(
-                        name=tool.name,
-                        description=tool.description or "",
-                        input_schema=tool.input_schema,
-                    )
-                    for tool in result.tools
-                ],
-                key=lambda tool: tool.name,
-            )
+            tools = [
+                MCPTool(
+                    name=tool.name,
+                    description=tool.description or "",
+                    input_schema=tool.input_schema or {"type": "object"},
+                )
+                for tool in result.tools
+            ]
+            return sorted(tools, key=lambda tool: tool.name)
         except Exception as error:
             raise RetrievalError("MCP tool discovery failed") from error
 
@@ -58,8 +54,14 @@ class SDKMCPConnection:
             structured_content = getattr(result, "structured_content", None)
             if structured_content is not None:
                 payload["structured_content"] = structured_content
+            serialized = json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
             return MCPCallResult(
-                content=_truncate(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True), self._max_tool_result_chars),
+                content=_truncate(serialized, self._max_tool_result_chars),
                 is_error=bool(result.is_error),
             )
         except RetrievalError:
@@ -69,7 +71,7 @@ class SDKMCPConnection:
 
 
 class MCPClient:
-    """Creates MCP SDK v2 connections using a caller-owned HTTP client lifecycle."""
+    """Creates one authenticated Streamable HTTP MCP session per retrieval run."""
 
     def __init__(
         self,
@@ -86,16 +88,25 @@ class MCPClient:
 
     @asynccontextmanager
     async def connect(self) -> AsyncIterator[MCPConnectionProtocol]:
+        if not self._settings.mcp_url:
+            raise RetrievalError("LUNIT_MCP_URL is not configured")
         if not self._settings.api_key:
             raise ConfigurationError("LUNIT_FM_API_KEY is required for MCP requests")
 
         caller_error: BaseException | None = None
         try:
-            async with self._http_client_factory(
-                headers={"Authorization": f"Bearer {self._settings.api_key}"},
-                timeout=httpx2.Timeout(self._settings.upstream_timeout_seconds),
-                follow_redirects=True,
-            ) as http_client, self._transport_factory(self._settings.mcp_url, http_client=http_client) as transport, self._client_factory(transport) as client:
+            async with (
+                self._http_client_factory(
+                    headers={"Authorization": f"Bearer {self._settings.api_key}"},
+                    timeout=httpx2.Timeout(self._settings.request_timeout_seconds),
+                    follow_redirects=True,
+                ) as http_client,
+                self._transport_factory(
+                    self._settings.mcp_url,
+                    http_client=http_client,
+                ) as transport,
+                self._client_factory(transport) as client,
+            ):
                 try:
                     yield SDKMCPConnection(client, self._settings.max_tool_result_chars)
                 except BaseException as error:
@@ -103,7 +114,7 @@ class MCPClient:
                     raise
         except Exception as error:
             if caller_error is not None:
-                raise caller_error
+                raise caller_error from error
             if isinstance(error, (ConfigurationError, RetrievalError)):
                 raise
             raise RetrievalError("MCP connection failed") from error
@@ -114,26 +125,31 @@ def _serialize_content_block(block: Any) -> dict[str, Any]:
     if block_type == "text":
         return {"type": "text", "text": block.text}
     if block_type in {"image", "audio"}:
-        return {"type": block_type, "mimeType": getattr(block, "mime_type", None)}
+        return {
+            "type": str(block_type),
+            "mimeType": getattr(block, "mime_type", None),
+        }
     if block_type == "resource_link":
         return _without_none(
             {
                 "type": "resource_link",
                 "name": block.name,
-                "uri": block.uri,
+                "uri": str(block.uri),
                 "mimeType": getattr(block, "mime_type", None),
             }
         )
     if block_type == "resource":
         resource = block.resource
-        resource_payload = _without_none(
-            {
-                "uri": resource.uri,
-                "mimeType": getattr(resource, "mime_type", None),
-                "text": getattr(resource, "text", None),
-            }
-        )
-        return {"type": "resource", "resource": resource_payload}
+        return {
+            "type": "resource",
+            "resource": _without_none(
+                {
+                    "uri": str(resource.uri),
+                    "mimeType": getattr(resource, "mime_type", None),
+                    "text": getattr(resource, "text", None),
+                }
+            ),
+        }
     return {"type": str(block_type)}
 
 
