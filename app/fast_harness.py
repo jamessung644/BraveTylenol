@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 
 from app.config import Settings
+from app.fast_policy import choose_generation_profile
 from app.fast_prompt import GENERATION_SYSTEM_PROMPT
 
 
@@ -42,14 +43,19 @@ class FastL2Harness:
         *,
         requested_max_tokens: int | None = None,
     ) -> dict[str, Any]:
+        profile = choose_generation_profile(messages)
         max_tokens = min(
-            requested_max_tokens or self.settings.max_completion_tokens,
+            requested_max_tokens or profile.max_tokens,
             self.settings.max_completion_tokens,
+            profile.max_tokens,
         )
         payload = {
             "model": self.settings.model,
             "messages": [
-                {"role": "system", "content": GENERATION_SYSTEM_PROMPT},
+                {
+                    "role": "system",
+                    "content": f"{GENERATION_SYSTEM_PROMPT}\n\n{profile.prompt_suffix}",
+                },
                 *messages,
             ],
             "max_tokens": max_tokens,

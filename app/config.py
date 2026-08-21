@@ -23,7 +23,7 @@ class Settings(BaseSettings):
         alias="REQUEST_TIMEOUT_SECONDS",
     )
     max_completion_tokens: int = Field(
-        1024,
+        1280,
         ge=256,
         le=4096,
         alias="MAX_COMPLETION_TOKENS",

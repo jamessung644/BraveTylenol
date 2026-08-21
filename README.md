@@ -12,7 +12,8 @@ Evaluator request -> L2 1회 -> final response
 
 - MCP retrieval과 retrieval-planner 호출을 기본 경로에서 제거했습니다.
 - tool schema를 보내지 않습니다.
-- `reasoning_effort=low`, 최대 1,024 completion token을 사용합니다.
+- `reasoning_effort=low`와 질문별 적응형 completion budget을 사용합니다.
+- 일반 질문은 최대 768 token/120단어, 응급·복합 질문은 최대 1,280 token/180단어입니다.
 - 실패 시 느린 자동 재시도를 하지 않습니다.
 - 하나의 async HTTP client와 keep-alive connection을 재사용합니다.
 - 전체 multi-turn history는 순서와 내용을 유지합니다.
@@ -47,10 +48,10 @@ L2 공식 가이드의 generation/retrieval 2단계는 권장 구조이며 필�
 | `LUNIT_FM_API_URL` | `https://model.hackathon.lunit.io` | L2 endpoint |
 | `LUNIT_FM_MODEL` | `Lunit/L2-preview` | 사용할 Model |
 | `REQUEST_TIMEOUT_SECONDS` | `65` | 단일 L2 호출 deadline |
-| `MAX_COMPLETION_TOKENS` | `1024` | server-side 출력 상한 |
+| `MAX_COMPLETION_TOKENS` | `1280` | 절대 server-side 출력 상한; 질문별 profile은 768/1280 사용 |
 | `LUNIT_REASONING_EFFORT` | `low` | L2 reasoning 설정 |
 
-Client가 더 큰 `max_tokens`를 보내도 server-side 상한을 넘지 않습니다.
+Client가 더 큰 `max_tokens`를 보내도 질문별 profile과 server-side 상한을 넘지 않습니다.
 
 ## Docker 실행
 
@@ -74,5 +75,6 @@ ruff check app tests
 python -m compileall -q app
 ```
 
-현재 deterministic suite는 단일 upstream 호출, tool 미사용, low reasoning, 토큰 상한,
-multi-turn 보존, streaming 거부, timeout mapping, 빈 L2 응답의 무재시도 실패를 검증합니다.
+현재 deterministic suite는 단일 upstream 호출, tool 미사용, low reasoning, 적응형 토큰 예산,
+응급 안내 prompt, multi-turn 보존, streaming 거부, timeout mapping, 빈 L2 응답의 무재시도
+실패를 검증합니다.
