@@ -185,6 +185,54 @@ async def test_chat_applies_requested_max_tokens_with_server_cap(
     assert RecordingL2.configured_max_tokens == expected_max_tokens
 
 
+async def test_chat_accepts_modern_text_parts_nullable_stream_and_completion_cap(monkeypatch):
+    class RecordingL2:
+        configured_max_tokens = None
+        calls = []
+
+        def __init__(self, settings, *, http_client=None):
+            del http_client
+            type(self).configured_max_tokens = settings.max_completion_tokens
+            self.last_usage = TokenUsage()
+            self.last_finish_reason = "stop"
+
+        async def complete(self, **kwargs):
+            type(self).calls.append(kwargs)
+            return L2Completion(content="호환 요청 답변", finish_reason="stop")
+
+    monkeypatch.setattr("app.L2Client", RecordingL2)
+    app = create_app(with_key(monkeypatch))
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {
+                        "role": "developer",
+                        "content": [{"type": "text", "text": "추가 안전 지침"}],
+                    },
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "질문"}],
+                    },
+                ],
+                "stream": None,
+                "max_completion_tokens": 600,
+            },
+        )
+
+    assert response.status_code == 200
+    assert RecordingL2.configured_max_tokens == 600
+    upstream = RecordingL2.calls[0]["messages"]
+    assert [(message["role"], message["content"]) for message in upstream[1:]] == [
+        ("system", "추가 안전 지침"),
+        ("user", "질문"),
+    ]
+
+
 async def test_chat_prefers_evaluator_bearer_over_environment_key(monkeypatch):
     monkeypatch.setenv("LUNIT_FM_API_KEY", "stale-deployment-key")
 

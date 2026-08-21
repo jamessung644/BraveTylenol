@@ -53,6 +53,19 @@ def create_app(
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         application.state.l2_http_client = httpx.AsyncClient()
+        application.state.l2_request_semaphore = asyncio.Semaphore(
+            resolved_settings.max_concurrent_l2_requests
+        )
+        logger.info(
+            "runtime_config agent_mode=%s rag_active=%s mcp_configured=%s "
+            "timeout_seconds=%.1f retry_attempts=%d max_concurrent_l2_requests=%d",
+            resolved_settings.agent_mode,
+            resolved_settings.rag_enabled,
+            bool(resolved_settings.mcp_url),
+            resolved_settings.request_timeout_seconds,
+            resolved_settings.retry_attempts,
+            resolved_settings.max_concurrent_l2_requests,
+        )
         try:
             yield
         finally:
@@ -66,7 +79,15 @@ def create_app(
 
     def build_orchestrator(request_settings: Settings) -> ChatOrchestrator:
         shared_http = getattr(application.state, "l2_http_client", None)
-        l2 = L2Client(request_settings, http_client=shared_http)
+        shared_semaphore = getattr(application.state, "l2_request_semaphore", None)
+        if shared_semaphore is None:
+            l2 = L2Client(request_settings, http_client=shared_http)
+        else:
+            l2 = L2Client(
+                request_settings,
+                http_client=shared_http,
+                request_semaphore=shared_semaphore,
+            )
         if request_settings.agent_mode == "passthrough":
             return ChatOrchestrator(
                 l2_client=l2,
@@ -74,10 +95,9 @@ def create_app(
                 mode="passthrough",
             )
 
-        # CoEval sends the API key in the request Bearer header and may not
-        # provide an MCP endpoint. Without MCP, preserve the medical system
-        # prompt but avoid a failed retrieval probe and a second L2 call.
-        if request_settings.agent_mode == "direct" or not request_settings.mcp_url:
+        # RAG requires a separate opt-in so legacy mode variables or an MCP URL
+        # left in the deployment environment cannot add tool calls to CoEval.
+        if not request_settings.rag_enabled:
             return ChatOrchestrator(
                 l2_client=l2,
                 generation_engine=GenerationEngine(l2, retrieval_engine=None),
@@ -161,9 +181,9 @@ def create_app(
             )
 
         settings_updates = {"lunit_fm_api_key": SecretStr(request_api_key)}
-        if request.max_tokens is not None:
+        if request.requested_max_tokens is not None:
             settings_updates["max_completion_tokens"] = min(
-                request.max_tokens,
+                request.requested_max_tokens,
                 resolved_settings.max_completion_tokens,
             )
         request_settings = resolved_settings.model_copy(update=settings_updates)

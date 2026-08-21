@@ -52,6 +52,12 @@ class Settings(BaseSettings):
         le=3,
         validation_alias="L2_RETRY_ATTEMPTS",
     )
+    max_concurrent_l2_requests: int = Field(
+        default=16,
+        ge=1,
+        le=64,
+        validation_alias="MAX_CONCURRENT_L2_REQUESTS",
+    )
     max_completion_tokens: int = Field(
         default=1_024,
         ge=512,
@@ -65,6 +71,10 @@ class Settings(BaseSettings):
     agent_mode: Literal["direct", "rag", "passthrough"] = Field(
         default="direct",
         validation_alias=AliasChoices("AGENT_MODE", "HARNESS_MODE"),
+    )
+    enable_rag: bool = Field(
+        default=False,
+        validation_alias="ENABLE_RAG",
     )
     mcp_url: str | None = Field(
         default=None,
@@ -108,6 +118,10 @@ class Settings(BaseSettings):
     @property
     def api_key(self) -> str | None:
         return self.lunit_fm_api_key.get_secret_value() if self.lunit_fm_api_key else None
+
+    @property
+    def rag_enabled(self) -> bool:
+        return self.enable_rag and self.agent_mode == "rag" and bool(self.mcp_url)
 
     @property
     def chat_completions_url(self) -> str:

@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class FunctionCall(BaseModel):
@@ -22,6 +22,28 @@ class ChatMessage(BaseModel):
     name: str | None = None
     tool_call_id: str | None = None
     tool_calls: list[ToolCall] | None = None
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def normalize_developer_role(cls, value: Any) -> Any:
+        # Modern OpenAI clients may emit `developer`; L2 receives the
+        # equivalent protected instruction as a standard system message.
+        return "system" if value == "developer" else value
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def normalize_text_content_parts(cls, value: Any) -> Any:
+        if not isinstance(value, list):
+            return value
+        text_parts: list[str] = []
+        for part in value:
+            if not isinstance(part, dict) or part.get("type") not in {"text", "input_text"}:
+                raise ValueError("Only text content parts are supported")
+            text = part.get("text")
+            if not isinstance(text, str):
+                raise ValueError("Text content parts require a string text field")
+            text_parts.append(text)
+        return "".join(text_parts)
 
 
 class TokenUsage(BaseModel):
@@ -79,7 +101,17 @@ class ChatCompletionRequest(BaseModel):
     model: str | None = None
     messages: list[ChatMessage] = Field(min_length=1)
     max_tokens: int | None = Field(default=None, ge=1)
-    stream: bool = False
+    max_completion_tokens: int | None = Field(default=None, ge=1)
+    stream: bool | None = False
+
+    @property
+    def requested_max_tokens(self) -> int | None:
+        requested = [
+            value
+            for value in (self.max_tokens, self.max_completion_tokens)
+            if value is not None
+        ]
+        return min(requested) if requested else None
 
 
 class ChatCompletionChoice(BaseModel):
