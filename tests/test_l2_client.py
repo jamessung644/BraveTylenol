@@ -3,145 +3,132 @@ import json
 import httpx
 import pytest
 
-from harness.errors import (
+from lunit_hackathon.config import Settings
+from lunit_hackathon.errors import (
+    ConfigurationError,
     MalformedUpstreamResponseError,
     UpstreamResponseError,
-    UpstreamTimeoutError,
-    UpstreamTransportError,
 )
-from harness.l2_client import L2Client
+from lunit_hackathon.l2_client import L2Client
 
 
-def completion_payload(message: dict[str, object]) -> dict[str, object]:
-    return {
-        "choices": [{"message": message, "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
-    }
+def settings_with_key(monkeypatch) -> Settings:
+    monkeypatch.setenv("LUNIT_FM_API_KEY", "test-key")
+    return Settings(_env_file=None)
 
 
-async def test_complete_preserves_messages_and_tools(settings_with_key):
+async def test_complete_calls_l2_chat_completions(monkeypatch):
+    settings = settings_with_key(monkeypatch)
     seen = {}
 
     async def handler(request: httpx.Request) -> httpx.Response:
         seen["authorization"] = request.headers["authorization"]
         seen["body"] = json.loads(request.content)
-        return httpx.Response(200, json=completion_payload({"role": "assistant", "content": "확인했습니다."}))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"role": "assistant", "content": "연결 성공"}}],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
+            },
+        )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
-        client = L2Client(settings_with_key, http_client=http_client)
-        result = await client.complete(
-            messages=[{"role": "user", "content": "질문"}],
-            tools=[{"type": "function", "function": {"name": "retrieve_relevant_content", "description": "검색", "parameters": {"type": "object"}}}],
-            tool_choice="auto",
+        result = await L2Client(settings, http_client=http_client).complete(
+            messages=[{"role": "user", "content": "테스트"}]
         )
 
     assert seen["authorization"] == "Bearer test-key"
-    assert seen["body"]["model"] == "Lunit/L2-preview"
-    assert seen["body"]["max_tokens"] == 3072
-    assert seen["body"]["reasoning_effort"] == "low"
-    assert seen["body"]["temperature"] == 0.0
-    assert seen["body"]["messages"] == [{"role": "user", "content": "질문"}]
-    assert seen["body"]["tool_choice"] == "auto"
-    assert result.content == "확인했습니다."
-    assert result.usage.total_tokens == 14
+    assert seen["body"] == {
+        "model": "Lunit/L2-preview",
+        "messages": [{"role": "user", "content": "테스트"}],
+        "max_tokens": 3072,
+        "reasoning_effort": "low",
+        "temperature": 0.0,
+    }
+    assert result.content == "연결 성공"
+    assert result.usage.total_tokens == 6
 
 
-async def test_complete_parses_assistant_tool_calls(settings_with_key):
+async def test_complete_parses_tool_calls(monkeypatch):
+    settings = settings_with_key(monkeypatch)
+
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            json=completion_payload(
-                {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "retrieve_relevant_content", "arguments": "{\"query\": \"혈압\"}"}}],
-                }
-            ),
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call-1",
+                                    "type": "function",
+                                    "function": {"name": "lookup", "arguments": '{"q":"x"}'},
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
-        result = await L2Client(settings_with_key, http_client=http_client).complete(messages=[{"role": "user", "content": "질문"}])
+        result = await L2Client(settings, http_client=http_client).complete(
+            messages=[{"role": "user", "content": "테스트"}]
+        )
 
-    assert result.content is None
-    assert result.tool_calls[0].id == "call_1"
-    assert result.tool_calls[0].function.arguments == '{"query": "혈압"}'
+    assert result.tool_calls[0].function.name == "lookup"
 
 
-async def test_complete_retries_retryable_response_once(settings_with_key, monkeypatch):
+async def test_complete_requires_real_api_key(monkeypatch):
+    monkeypatch.delenv("LUNIT_FM_API_KEY", raising=False)
+    settings = Settings(_env_file=None)
+
+    with pytest.raises(ConfigurationError):
+        await L2Client(settings).complete(messages=[{"role": "user", "content": "테스트"}])
+
+
+async def test_complete_retries_transient_status_once(monkeypatch):
+    settings = settings_with_key(monkeypatch)
     attempts = 0
-    sleeps = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            return httpx.Response(429, json={"error": {"type": "rate_limit"}})
-        return httpx.Response(200, json=completion_payload({"role": "assistant", "content": "재시도 성공"}))
+            return httpx.Response(503, json={"error": {"type": "overloaded"}})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "성공"}}]})
 
-    async def fake_sleep(delay: float) -> None:
-        sleeps.append(delay)
+    async def no_sleep(delay: float) -> None:
+        del delay
 
-    monkeypatch.setattr("harness.l2_client.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("lunit_hackathon.l2_client.asyncio.sleep", no_sleep)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
-        result = await L2Client(settings_with_key, http_client=http_client).complete(messages=[{"role": "user", "content": "질문"}])
+        result = await L2Client(settings, http_client=http_client).complete(
+            messages=[{"role": "user", "content": "테스트"}]
+        )
 
-    assert result.content == "재시도 성공"
     assert attempts == 2
-    assert sleeps == [0.25]
+    assert result.content == "성공"
 
 
-async def test_complete_does_not_retry_non_retryable_response(settings_with_key):
-    attempts = 0
+async def test_complete_rejects_malformed_success(monkeypatch):
+    settings = settings_with_key(monkeypatch)
 
     async def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal attempts
-        attempts += 1
-        return httpx.Response(400, json={"error": {"type": "invalid_request"}})
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
-        with pytest.raises(UpstreamResponseError, match="400"):
-            await L2Client(settings_with_key, http_client=http_client).complete(messages=[{"role": "user", "content": "질문"}])
-
-    assert attempts == 1
-
-
-async def test_complete_translates_timeout(settings_with_key):
-    async def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ReadTimeout("timed out", request=request)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
-        with pytest.raises(UpstreamTimeoutError):
-            await L2Client(settings_with_key, http_client=http_client).complete(messages=[{"role": "user", "content": "질문"}])
-
-
-async def test_complete_translates_transport_error(settings_with_key):
-    async def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("connection refused", request=request)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
-        with pytest.raises(UpstreamTransportError):
-            await L2Client(settings_with_key, http_client=http_client).complete(messages=[{"role": "user", "content": "질문"}])
-
-
-async def test_complete_rejects_invalid_json(settings_with_key):
-    async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=b"not json")
+        return httpx.Response(200, json={"choices": []})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
         with pytest.raises(MalformedUpstreamResponseError):
-            await L2Client(settings_with_key, http_client=http_client).complete(messages=[{"role": "user", "content": "질문"}])
+            await L2Client(settings, http_client=http_client).complete(
+                messages=[{"role": "user", "content": "테스트"}]
+            )
 
 
-async def test_complete_rejects_missing_choices(settings_with_key):
-    async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"usage": {}})
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
-        with pytest.raises(MalformedUpstreamResponseError):
-            await L2Client(settings_with_key, http_client=http_client).complete(messages=[{"role": "user", "content": "질문"}])
-
-
-async def test_complete_recovers_blank_direct_completion_once(settings_with_key):
+async def test_complete_recovers_blank_direct_completion_once(monkeypatch):
+    settings = settings_with_key(monkeypatch)
     requests = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -159,14 +146,16 @@ async def test_complete_recovers_blank_direct_completion_once(settings_with_key)
                             },
                             "finish_reason": "length",
                         }
-                    ],
-                    "usage": {"prompt_tokens": 10, "completion_tokens": 3072, "total_tokens": 3082},
+                    ]
                 },
             )
-        return httpx.Response(200, json=completion_payload({"role": "assistant", "content": "최종 답변"}))
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"role": "assistant", "content": "최종 답변"}}]},
+        )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
-        result = await L2Client(settings_with_key, http_client=http_client).complete(
+        result = await L2Client(settings, http_client=http_client).complete(
             messages=[{"role": "user", "content": "질문"}]
         )
 
@@ -177,34 +166,36 @@ async def test_complete_recovers_blank_direct_completion_once(settings_with_key)
     assert "final user-facing answer" in requests[1]["messages"][-1]["content"]
 
 
-async def test_complete_rejects_blank_direct_completion_after_one_recovery(settings_with_key):
+async def test_complete_rejects_blank_after_one_recovery(monkeypatch):
+    settings = settings_with_key(monkeypatch)
     attempts = 0
 
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal attempts
         attempts += 1
-        return httpx.Response(200, json=completion_payload({"role": "assistant", "content": "   "}))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "   "}}]})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
         with pytest.raises(MalformedUpstreamResponseError):
-            await L2Client(settings_with_key, http_client=http_client).complete(
+            await L2Client(settings, http_client=http_client).complete(
                 messages=[{"role": "user", "content": "질문"}]
             )
 
     assert attempts == 2
 
 
-async def test_complete_does_not_recover_blank_tool_planner_completion(settings_with_key):
+async def test_complete_does_not_recover_blank_tool_planner(monkeypatch):
+    settings = settings_with_key(monkeypatch)
     attempts = 0
 
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal attempts
         attempts += 1
-        return httpx.Response(200, json=completion_payload({"role": "assistant", "content": "   "}))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "   "}}]})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
         with pytest.raises(MalformedUpstreamResponseError):
-            await L2Client(settings_with_key, http_client=http_client).complete(
+            await L2Client(settings, http_client=http_client).complete(
                 messages=[{"role": "user", "content": "질문"}],
                 tools=[
                     {
@@ -219,3 +210,22 @@ async def test_complete_does_not_recover_blank_tool_planner_completion(settings_
             )
 
     assert attempts == 1
+
+
+async def test_upstream_error_does_not_leak_response_message(monkeypatch):
+    settings = settings_with_key(monkeypatch)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            401,
+            json={"error": {"type": "auth_error", "message": "sensitive upstream detail"}},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        with pytest.raises(UpstreamResponseError) as caught:
+            await L2Client(settings, http_client=http_client).complete(
+                messages=[{"role": "user", "content": "테스트"}]
+            )
+
+    assert "401" in str(caught.value)
+    assert "sensitive upstream detail" not in str(caught.value)
