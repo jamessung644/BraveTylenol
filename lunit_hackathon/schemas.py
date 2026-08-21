@@ -55,6 +55,8 @@ class MCPTool(BaseModel):
 class MCPCallResult(BaseModel):
     content: str
     is_error: bool = False
+    cite_uids: list[str] = Field(default_factory=list)
+    citation_contents: dict[str, str] = Field(default_factory=dict)
 
 
 class EvidenceItem(BaseModel):

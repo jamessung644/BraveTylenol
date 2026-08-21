@@ -3,6 +3,7 @@ import json
 import logging
 import re
 from collections.abc import Mapping, Sequence
+from time import perf_counter
 from typing import Any, ClassVar, Self
 
 import httpx
@@ -74,6 +75,12 @@ class L2Client:
         if tool_choice is not None:
             payload["tool_choice"] = tool_choice
 
+        logger.info(
+            "l2_request messages=%d tools=%d tool_choice=%s",
+            len(messages),
+            len(tools or []),
+            _tool_choice_label(tool_choice),
+        )
         response = await self._post(payload, api_key)
         try:
             completion = self._parse_completion(response)
@@ -86,7 +93,14 @@ class L2Client:
             if recovery_payload is None:
                 raise
             completion = self._parse_completion(await self._post(recovery_payload, api_key))
-        self.last_usage = completion.usage
+        self.last_usage = _sum_usage(self.last_usage, completion.usage)
+        logger.info(
+            "l2_completion content_chars=%d tool_calls=%d prompt_tokens=%d completion_tokens=%d",
+            len(completion.content or ""),
+            len(completion.tool_calls),
+            completion.usage.prompt_tokens,
+            completion.usage.completion_tokens,
+        )
         return completion
 
     def _blank_completion_recovery_payload(
@@ -155,6 +169,7 @@ class L2Client:
         timeout = httpx.Timeout(self._settings.request_timeout_seconds)
 
         for attempt in range(self._settings.retry_attempts + 1):
+            started = perf_counter()
             try:
                 response = await client.post(
                     self._settings.chat_completions_url,
@@ -166,24 +181,40 @@ class L2Client:
                     timeout=timeout,
                 )
             except httpx.TimeoutException as error:
+                logger.warning("l2_request_failed error_code=timeout")
                 raise UpstreamTimeoutError("L2 request timed out") from error
             except httpx.TransportError as error:
+                logger.warning("l2_request_failed error_code=transport")
                 raise UpstreamTransportError("L2 service is unreachable") from error
 
+            duration_ms = (perf_counter() - started) * 1_000
             if (
                 response.status_code in _RETRYABLE_STATUS_CODES
                 and attempt < self._settings.retry_attempts
             ):
                 delay = min(0.25 * (2**attempt), 1.0)
                 logger.warning(
-                    "l2_retry attempt=%d status=%d",
+                    "l2_retry attempt=%d status=%d duration_ms=%.1f",
                     attempt + 1,
                     response.status_code,
+                    duration_ms,
                 )
                 await asyncio.sleep(delay)
                 continue
             if response.is_error:
+                logger.warning(
+                    "l2_request_failed error_code=http_%d attempt=%d duration_ms=%.1f",
+                    response.status_code,
+                    attempt + 1,
+                    duration_ms,
+                )
                 raise UpstreamResponseError(self._sanitized_error(response))
+            logger.info(
+                "l2_request_complete status=%d attempt=%d duration_ms=%.1f",
+                response.status_code,
+                attempt + 1,
+                duration_ms,
+            )
             return response
 
         raise AssertionError("unreachable")
@@ -232,3 +263,22 @@ class L2Client:
             if isinstance(raw_type, str):
                 error_type = re.sub(r"[^A-Za-z0-9_.-]", "", raw_type)[:80] or "unknown"
         return f"L2 returned HTTP {response.status_code} ({error_type})"
+
+
+def _sum_usage(left: TokenUsage, right: TokenUsage) -> TokenUsage:
+    return TokenUsage(
+        prompt_tokens=left.prompt_tokens + right.prompt_tokens,
+        completion_tokens=left.completion_tokens + right.completion_tokens,
+        total_tokens=left.total_tokens + right.total_tokens,
+    )
+
+
+def _tool_choice_label(tool_choice: str | Mapping[str, Any] | None) -> str:
+    if tool_choice is None:
+        return "none"
+    if isinstance(tool_choice, str):
+        return tool_choice
+    function = tool_choice.get("function")
+    if isinstance(function, Mapping) and isinstance(function.get("name"), str):
+        return f"function:{function['name']}"
+    return "mapping"

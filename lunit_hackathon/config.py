@@ -44,7 +44,7 @@ class Settings(BaseSettings):
         validation_alias="REQUEST_TIMEOUT_SECONDS",
     )
     retry_attempts: int = Field(
-        default=1,
+        default=2,
         ge=0,
         le=3,
         validation_alias="L2_RETRY_ATTEMPTS",
