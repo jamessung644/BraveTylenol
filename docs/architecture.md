@@ -1,114 +1,279 @@
 # Architecture
 
-이 문서는 사용자가 제공한 Lunit 해커톤 핵심 규칙과 API 계약을 기준으로 한 제출 구조를
-설명한다. 대시보드 규칙 페이지는 개발 시점의 브라우저 실행 환경 오류로 자동 열람하지
-못했으므로, 제출 직전에 공식 페이지의 포트·타임아웃·MCP 주소를 다시 대조해야 한다.
+이 문서는 `baseline/024-hybrid` 위에 이식한 제출 runtime의 실행 구조를 설명한다. 구현 계약의
+최종 authority는 [Lunit FM quick start](https://dashboard.hackathon.lunit.io/quick-start/lunit-fm),
+[MCP tools quick start](https://dashboard.hackathon.lunit.io/quick-start/mcp-tools),
+[Rules](https://dashboard.hackathon.lunit.io/rules),
+[Model quick start](https://dashboard.hackathon.lunit.io/quick-start/model)이며 Dashboard와 저장소
+문서가 다르면 Dashboard를 우선한다.
 
 ## 목표와 불변 조건
 
 가장 중요한 불변 조건은 **사용자에게 반환되는 의료 답변의 모든 문장이 Lunit L2가 생성한
 텍스트여야 한다**는 것이다.
 
-- Python 코드는 요청 검증, 도구 프로토콜, 근거 크기 제한, 오류 매핑만 수행한다.
-- 직접 답변은 L2 첫 생성 결과를 그대로 반환한다.
-- 검색 답변은 MCP 결과를 근거 데이터로 L2에 다시 전달하고 L2의 다음 생성 결과를 그대로
-  반환한다.
-- MCP 장애 시 Python이 답변을 대신 만들지 않고 의료 안전 프롬프트를 포함해 L2를 다시
-  호출한다.
-- HealthBench 문항이나 예상 답변을 식별하거나 하드코딩하지 않는다.
+- Python은 요청 검증, 경로 선택, 도구 protocol, strict schema binding, 근거 크기·인용 검증,
+  오류 mapping만 담당한다.
+- direct 경로는 L2의 최종 생성 결과를 그대로 반환한다.
+- RAG 경로는 MCP result를 신뢰하지 않는 evidence data로 frozen inbound에서 새로 만든
+  post-retrieval final transcript에 넣고, 마지막 L2의 사용자용 텍스트를 반환한다.
+- MCP 장애·초과시간에는 Python이 의료 답변이나 출처를 만들지 않는다. 구조화된 제한 상태를
+  독립된 evidence-failure final prompt에 넣고 남겨 둔 시간으로 L2가 최종 답변을 작성한다.
+- HealthBench 문항, 예상 답변 또는 문항별 routing을 식별하거나 하드코딩하지 않는다.
+
+## 실제 image와 entrypoint
+
+Docker는 `app.py`와 `lunit_hackathon/`만 복사하고 다음 command로 FastAPI를 실행한다.
+
+~~~text
+uvicorn app:app --host 0.0.0.0 --port 8000 --no-access-log
+~~~
+
+저장소의 `main.py`와 `tests/`, `docs/`, `canonical_sources/`, `runtime_sources/`는 image에
+포함되지 않는다. `main.py`는 direct-only baseline 대조군이며 제출 runtime의 entrypoint나
+fallback provider가 아니다. Runtime prompt와 binding manifest는 build 전에 compile되어
+`lunit_hackathon/runtime_artifacts/` 안의 검증된 artifact로 image에 들어간다.
 
 ## 요청 흐름
 
-    POST /v1/chat/completions
-            |
-            v
-    입력 스키마 검증
-    (model 생략 허용, max_tokens를 서버 상한 이내로 제한)
-            |
-            v
-       실행 모드 선택
-            |
-            +-- direct(기본) --> L2 의료 생성 --> L2 텍스트 그대로 반환
-            |
-            +-- passthrough --> L2 전달 --> L2 텍스트 그대로 반환
-            |
-            +-- rag + MCP URL --> L2 검색 결정 --> retrieve_relevant_content(query)
-                                                        |
-                                                        v
-                                                 MCP 도구 동적 발견
-                                                        |
-                                                        v
-                                                 L2 검색 계획 및 도구 호출
-                                                        |
-                                                        v
-                                                 인용 선택·중복 제거·크기 제한
-                                                        |
-                                                        v
-                                                 근거를 L2에 전달
-                                                        |
-                                                        v
-                                                 L2 최종 텍스트 그대로 반환
+~~~text
+POST /v1/chat/completions
+        |
+        v
+HTTP/JSON boundary 검증 -- 실패 --> 4xx
+        |
+        v
+mode selection (default hybrid; direct opt-out)
+        |
+        +-- direct 또는 일반/응급/저위험·안정 정보 --> direct Generation L2 1회 --> L2 text
+        |
+        +-- source-dependent --> RAG admission (최대 4)
+                                  |
+                                  +-- full + source-dependent --> mcp_failure_final L2 1회
+                                  +-- full + non-source --> direct L2 1회
+                                  |
+                                  +-- admitted
+                                        |
+                                        v
+                              Generation L2가 retrieval 필요성 선택
+                              harness가 검증된 사용자 원문으로 query 구성
+                                        |
+                                        v
+                        process-cached strict MCP registry resolve
+                                        |
+                                        v
+                           query별 최소 tool subset 선택
+                                        |
+                                        v
+                       Retrieval L2 -- MCP remote call 기본 1회/ceiling 3회
+                                        |
+                                        v
+                      local finalize + observed cite_uid 검증
+                                        |
+                                        v
+                       frozen inbound + evidence final context
+                                        |
+                                        v
+                    phase-specific final Generation L2 --> validator
+                                        |
+                                        +-- invalid --> clean fresh recovery 정확히 1회
+                                        |
+                                        v
+                                  plain L2 text
+~~~
 
-기본 컨테이너는 `AGENT_MODE=direct`이므로 MCP URL이 환경에 있어도 안전 프롬프트 기반 L2
-직접 호출을 사용한다. RAG는 `AGENT_MODE=rag`와 `LUNIT_MCP_URL`이 모두 있을 때만
-활성화된다. `AGENT_MODE=rag`인데 URL이 없으면 직접 생성으로 안전하게 폴백한다.
-`AGENT_MODE=passthrough`는 검색 조정 없이 동일한 안전 프롬프트를 적용하는 진단 모드다.
+기본값은 `AGENT_MODE=hybrid`다. 일반 질문은 direct final fast path로 유지하고,
+source-dependent 질문만 Retrieval로 보낸다. `direct`는 MCP를 완전히 끄는 비교·복구
+variant이고, `rag`는 정상 질문 전체를 Generation tool trajectory에 넣는 진단 variant다.
+`passthrough`도 검색 조정만
+건너뛰며 direct final prompt와 동일한 plain-answer validator/recovery를 통과한다.
+
+응급 표현은 application 기능이나 내부 route 출력 형식을 포함하지 않는 독립 emergency final
+prompt를 사용해 검색 때문에 즉시 행동 안내가 늦어지지 않게 한다. Guard가 모호한 과거·부정·
+인용을 현재 응급으로 오인해도 같은 prompt가 원문을 다시 판단해 자연어로 답한다. 이 phase는
+근거를 조회하지 않으므로 조회하지 않은 공식 출처·URL·학회·저널·법령 단정과 새 경구약·구체
+용량 지시를 validator가 거부한다. 현재 위험에서는 현지 응급번호(대한민국 위치 확인 시 119),
+안전한 위치, dispatcher 지시를 우선하며 통제되지 않는 외부 출혈은 지속 직접압박을 중심으로 한다.
+
+Generation prompt는 `tool_decision`, `direct_final`, `post_retrieval_final`,
+`mcp_failure_final`, `emergency_final`, `clean_recovery_final` 여섯 artifact로 나뉘고 각각
+SHA-256 검증된다. 근거 기능의 이름·schema·호출 지시는 tool-decision phase에만 존재한다.
+Final phase는 이전 decision system, application call, invalid assistant draft를 append하지 않고
+항상 frozen inbound와 phase context에서 새 transcript를 만든다.
+
+## Hybrid routing 계약
+
+Routing은 source가 필요한 가능성이 높은 영역에만 보수적으로 RAG를 허용한다.
+
+- KCD·질병분류·상병코드
+- MFDS·식약처 허가/품목/성분
+- HIRA·심평원 급여/비급여/약가/수가
+- 대한민국 법령·의료법·약사법·조문
+- 최신/현행 확인이 붙은 진료지침·논문·연구
+- “공식 근거”, “출처를 알려”, “인용해” 같은 명시적 source request
+
+반대로 일반 증상·생활습관·안정적인 의학 상식, 불완전한 단어 나열, 넓은 의미의 “최신”이나
+“출처” 단독 표현은 direct를 기본으로 한다. 최신 두 user turn만 NFKC와 공백 정리 후 비교해
+도치·띄어쓰기 변화는 흡수하되, 오래된 대화 keyword가 현재 질문을 RAG로 끌고 가지 않게 한다.
+이 routing은 진단기가 아니며 질문의 임상 의미를 수정하지 않는다.
+
+## 자연어 입력 계약
+
+Compiled Generation/Retrieval prompt는 오타, 띄어쓰기 오류, 음성 전사 오류, 단어 나열,
+조사·주어 생략, 문장 도치, 구어체·방언·축약, 이모지, 한국어/영어 혼용을 유효한 자연어로
+다룬다.
+
+원문 사용자 진술과 내부 표면형 정리를 분리한다. 약·성분·제품·용량·단위·검사 극성·부위·
+대상자·시간 관계는 인접 keyword나 어순만으로 결합하거나 자동 교정하지 않는다. 가능한 해석이
+여러 개이고 결론·긴급도·금기가 달라지면 unknown과 후보를 보존하고, 안전한 조건부 안내 뒤
+가장 중요한 확인 질문 1~3개만 묻는다. Retrieval query도 사용자에게 없던 대상 인구·관할·
+기준일을 발명하지 않으며 불확실하면 `partial` 또는 `no_evidence`로 끝낸다.
+
+## MCP discovery, binding, 최소 노출
+
+Lifespan에서 하나의 `ToolBindingRegistry`를 만들고 모든 요청이 공유한다. 최초 RAG 연결에서
+live discovery의 각 canonical logical alias를 raw schema와 strict wrapper에 독립적으로
+compile한다. 누락·drift·lossless projection 불가 alias는 그 alias만 quarantine하고, 검증된
+불변 tuple을 process lifetime 동안 재사용한다. 사용자 입력으로 tool 이름을 만들거나 미등록
+tool을 L2에 노출하지 않는다. 질문 도메인의 도구가 전부 격리되었을 때만 해당 route를
+근거 없음으로 안전하게 종료한다. 일부 alias만 남은 route는 살아 있는 alias만 exact하게
+설명하는 generic fragment를 만들고, 필요한 후속 열람 도구가 없으면 discovery 결과를 최종
+근거로 승격하지 않는다.
+
+검증된 registry에서 query domain별 최소 subset만 Retrieval L2에 제공한다.
+
+| Domain | 노출되는 logical tool 묶음 |
+| --- | --- |
+| KCD | code search + exact name |
+| MFDS | ingredient/permission lookup + indication/source metadata (최대 2-hop) |
+| HIRA | update + disease code + drug price |
+| 법령 | law search + article list + article body |
+| ADR | drug information |
+| 일반 guideline | index keyword/relevant node discovery + page content (최대 3-hop) |
+| research | data-source discovery + source detail + vector query (최대 3-hop) |
+
+Retrieval L2의 MCP remote call budget은 기본 한 번이며 실험·release artifact와 도메인 ceiling
+안에서 최대 세 번이다. Budget 뒤에는 strict local `finalize_retrieval`을 강제한다. Finalizer는 MCP endpoint로 보내지 않으며 실제
+result에서 관찰된 `cite_uid`, score 범위, 중복, item 수를 검증한다. Tool content는 8,000자,
+전체 evidence는 12,000자로 제한한다.
+
+`AGENT_MODE=hybrid`만 켜면 안전한 기본 `MAX_MCP_CALLS=1`이 유지된다. MFDS 2-hop이나
+guideline·research·법령 3-hop을 실험하려면 `MAX_MCP_CALLS=2|3`도 명시해야 하며, 이 값은
+artifact ceiling과 도메인 ceiling을 넘지 못한다. 현재 paired live 결과는 기본 hybrid 승격을
+지지하지 않았지만, 최종 제출 지시에 따라 hybrid를 기본값으로 선택한다. `MAX_MCP_CALLS=1`과
+direct fast path를 유지하고 `AGENT_MODE=direct`로 즉시 비활성화할 수 있다.
+
+## 시간 예산과 MCP stall 격리
+
+| Budget | 기본값 | 설계 의도 |
+| --- | ---: | --- |
+| request deadline | 165초 | 모든 L2/MCP 단계의 절대 상한 |
+| generic/default model attempt | 45초 | 단계별 override가 없는 model 호출 상한 |
+| model retry | 0 | tail latency 억제 |
+| RAG initial application-tool | 25초 | retrieval query 생성 |
+| forced-tool retry | 10초 | 명시적 source 요청에서 tool call 누락 시 한 번만 재강제 |
+| emergency final | 45초, 최대 1,536 tokens | 검색 전 즉시 행동 답변 |
+| retrieval hard slice | `min(50초, request × 0.31)` = 50초 | MCP와 planner 전체 격리 |
+| retrieval planner L2 | attempt당 25초 | remote call 계획 및 local finalization; 전체 Retrieval 50초 상한 적용 |
+| final Generation | 45초, 최대 3,072 tokens | evidence/no-evidence 뒤 사용자 답변 reserve |
+| clean final recovery | 30초, 최대 1,536 tokens | plain text·종료 사유·인용 invariant 재생성 또는 최초 final timeout 복구, 정확히 1회 |
+| RAG admission | 4 | slow trajectory 동시 진입 제한 |
+| MCP call | 기본 1, effective ceiling 3 | artifact·설정·도메인 중 최솟값으로 tool loop 상한 |
+| model semaphore | 16 | CoEval 동시성에 맞춘 보호 |
+| MCP session semaphore | 16 | connect/discovery/call 전체 점유 제한 |
+
+각 phase timeout에는 model semaphore acquire 대기시간도 포함된다. RAG의 initial,
+forced-tool, planner와 모든 final/recovery 단계는 client 내부 blank-completion recovery를 끄고
+명시된 phase budget을 넘기지 않는다. Final content가 비어 있거나 application protocol 흔적을
+포함하거나 종료 사유가 `stop`/미지정 이외이거나 인용 계약을 위반하면 frozen inbound에서
+clean final recovery를 정확히 한 번 실행하고, 재실패는 sanitized 502로 종료한다.
+
+MCP transport의 connect/discovery/call이 정지해도 Retrieval 전체 `asyncio.timeout`이 먼저
+취소하고 `retrieval_timeout` no-evidence로 전환한다. Hybrid와 forced RAG의 admission
+acquire도 0.01초만 기다린 뒤 direct로 전환한다. 이 둘은 MCP를 무한 대기시키는 것이 아니라
+**MCP 때문에 최종
+L2 응답 기회를 잃지 않도록** first-routing slice와 final-generation slice를 예약하는 방식이다.
+
+RAG가 시작된 뒤 Retrieval 실패 시 일반 direct prompt로 몰래 전환하지 않는다. Frozen inbound와
+구조화된 실패 상태만 사용해 전용 evidence-failure final transcript를 만들고 L2가 답한다.
 
 ## 평가 API 계약
 
 - `POST /v1/chat/completions`의 `model`은 생략할 수 있다.
-- 모델을 생략한 응답과 `GET /v1/models`에서 사용하는 평가용 모델 ID는
-  `team-chatbot`이다.
-- 선택적인 요청 `max_tokens`는 서버 상한을 늘리지 못한다. 기본 서버 상한은 1,024이며,
-  요청값이 더 작을 때만 해당 값으로 L2 호출을 제한한다.
-- 기본 재시도 횟수는 1회이므로 각 L2 단계의 429/502/503/504 응답에 대해 최초 호출을
-  포함해 최대 2회 시도한다. 연결과 connection-pool 대기는 각각 최대 5초이며, 모든 L2
-  단계·재시도·빈 응답 복구는 하나의 전체 요청 기한 안에서만 실행된다.
-- 응답의 `finish_reason`은 L2의 실제 종료 사유(`stop`, `length` 등)를 보존한다.
-- 스트리밍은 지원하지 않으며 `stream=true` 요청은 400으로 거절한다.
+- `GET /v1/models`는 `team-chatbot`과 `Lunit/L2-preview`를 반환한다.
+- 선택적인 `max_tokens`/`max_completion_tokens`는 서버 상한 4,096을 늘릴 수 없다.
+- 대화 선두의 `system`/`developer`, `text`·`input_text` content part와 허용된
+  metadata/sampling field는 CoEval 호환 입력으로 받는다.
+- 호출자 제공 system-like text는 untrusted user context로 downgrade하며 compiled medical
+  system prompt를 덮어쓸 수 없다.
+- Client-supplied `tools`, `tool_choice`, function/tool protocol과 tool message는 400으로
+  거절해 내부 application-tool authority와 분리한다.
+- Retrieval 계획 단계는 1,536 token으로 제한해 final answer token reserve를 보존한다.
+- 응답 `finish_reason`은 L2의 실제 종료 사유를 보존한다.
+- streaming은 지원하지 않으며 `stream=true`는 400으로 거절한다.
+- 전체 request body는 600,000 byte, JSON 깊이는 32로 제한하고 duplicate key와 non-finite
+  number를 거절한다.
 
 ## 컴포넌트
 
 | 파일 | 책임 |
 | --- | --- |
-| app.py | OpenAI 호환 HTTP 계약, 총 요청 기한, 오류 상태 변환 |
-| main.py | 서버 및 실 L2 연결 확인 CLI |
-| config.py | .env/환경 변수 검증과 비밀값 마스킹 |
-| l2_client.py | L2 Chat Completions 호출, 제한된 재시도, 응답 검증 |
-| generation.py | L2가 검색 필요성을 결정하고 최종 답변을 생성하도록 조정 |
-| mcp_client.py | MCP SDK 및 Streamable HTTP 전송을 애플리케이션에서 격리 |
-| retrieval.py | MCP 도구 스키마 검증, 호출 예산, 인용 선택, 근거 크기 제한 |
-| orchestrator.py | direct/RAG/passthrough 선택과 검색 장애 시 L2 폴백 |
-| prompts.py | 일반화된 의료 안전 및 검색 계획 지침 |
-| logging_config.py | 프롬프트·근거·자격 증명을 제외한 운영 로그 |
+| `app.py` | FastAPI lifespan, OpenAI-compatible API, 전체 deadline과 semaphore |
+| `main.py` | image 밖의 legacy direct-only 대조군 |
+| `config.py` | .env/환경 변수 검증과 비밀값 마스킹 |
+| `artifacts.py` | compiled prompt·model/MCP manifest load와 hash 검증 |
+| `l2_client.py` | async L2 Chat Completions, attempt deadline, 응답 검증 |
+| `generation.py` | hybrid source routing, direct/RAG/emergency L2 trajectory, citation 검증 |
+| `mcp_client.py` | MCP SDK Streamable HTTP 전송과 result normalization |
+| `tool_bindings.py` | live schema의 strict projection, fingerprint와 name-plane binding |
+| `retrieval.py` | registry cache, 최소 tool 선택, one-call budget, evidence ledger/finalizer |
+| `orchestrator.py` | mode 선택, non-blocking RAG admission, direct/RAG 실행 |
+| `prompts.py` | compiled 의료 안전·자연어·Retrieval instruction 노출 |
+| `logging_config.py` | prompt·근거·자격 증명을 제외한 운영 로그 |
 
-## 오류와 폴백
+## 오류와 degrade 동작
 
 | 상황 | 동작 |
 | --- | --- |
-| API Key 없음 | 준비 상태는 200, 채팅은 503 |
+| 유효한 환경·request Bearer credential 모두 없음 | health는 200, readiness/chat은 503 |
+| 환경 key 없는 evaluator가 유효한 Bearer로 `/readyz` 호출 | static readiness 200; 외부 dependency는 preflight하지 않음 |
 | L2 타임아웃 | 504 |
 | L2 전송/응답/형식 오류 | 세부정보를 숨긴 502 |
-| rag 모드에서 MCP URL 없음 또는 연결 실패 | 안전 프롬프트 기반 L2 직접 생성 |
-| 개별 MCP 도구 실패 | 검색 L2에 구조화된 오류 전달 |
-| 잘못된 도구 이름/인자 | 실행하지 않고 프로토콜 오류 전달 |
-| MCP 호출 예산 소진 | 수집된 근거를 partial로 L2에 전달 |
-| 스트리밍 요청 | 현재 계약에서는 400 |
+| RAG admission full + source-dependent | 대기하지 않고 fresh `mcp_failure_final` L2 |
+| RAG admission full + non-source | 대기하지 않고 direct L2 |
+| MCP timeout/연결 실패 | frozen inbound + failure context의 fresh `mcp_failure_final` L2 |
+| live registry 누락·중복·schema drift | MCP call 없이 retrieval dependency error |
+| 잘못된 tool 이름/인자 | 실행하지 않고 구조화된 protocol error |
+| MCP 호출 예산 소진 | local finalizer만 허용하고 현재 evidence 상태로 종료 |
+| citation 없음·불일치 | fresh `clean_recovery_final` L2 1회; Python 답변 합성 금지 |
+| streaming 요청 | 400 |
+
+## KDCA ASP/KONAS source boundary
+
+[KDCA 항생제 사용관리 자료 목록](https://www.kdca.go.kr/kdca/2857/subview.do?enc=Zm5jdDF8QEB8JTJGYmJzJTJGa2RjYSUyRjQ5JTJGYXJ0Y2xMaXN0LmRvJTNGcmdzQmduZGVTdHIlM0QlMjZjc3JmVG9rZW4lM0QzMDAzODA1ZS03MjNkLTRiMDktOTdjMy0wNjI3YTU2ODBhYTklMjZmaW5kT3Bud3JkJTNEJTI2ZmluZFdvcmQlM0QlMjZyZ3NFbmRkZVN0ciUzRCUyNmZpbmRUeXBlJTNEJTI2ZmluZENsU2VxJTNEJTI2cGFnZSUzRDElMjY%3D)과
+[KDCA 적정사용을 위한 각종 정책](https://www.kdca.go.kr/kdca/3515/subview.do)은 현재
+prompt에서 ASP/KONAS의 source role과 적용 경계를 정하는 정책 참고자료다. 기관 운영자료,
+항생제 사용 집계, 교육·시범사업은 개인 환자의 항생제 필요성·선택·용량·기간을 직접 지지하지
+않는다. 관리료 보상 연계의 존재와 현재 대상·금액·청구 조건도 같은 claim이 아니며 후자는
+적절한 최신 HIRA 근거가 필요하다.
+
+현재 release에는 KDCA live 게시물/첨부 또는 local snapshot을 검색해 observed `cite_uid`를
+만드는 승인된 adapter가 없다. 그러므로 두 URL과 canonical source map은 개발·policy fixture일
+뿐 model-facing evidence가 아니다. KDCA의 정확한 최신 사실을 검색 가능한 것처럼 표현하지
+않고 공식 MCP corpus에서 실제 근거를 찾지 못하면 `coverage_gap` 또는 `no_evidence`를
+Generation에 전달한다.
 
 ## 격리 평가 환경
 
-런타임 네트워크 대상은 다음 두 종류뿐이다.
+Runtime의 외부 network 대상은 compiled manifest에 고정된 Lunit L2 endpoint와 공식 MCP
+endpoint 두 종류뿐이다. 일반 웹 검색, 상용 검색 API, cloud vector DB, remote analytics에는
+의존하지 않는다. MCP가 느리거나 실패해도 final L2 reserve를 사용하지만, hybrid/rag manifest가
+요구한 endpoint나 registry가 잘못된 경우 조용히 다른 remote source로 우회하지 않는다.
 
-1. 필수 Lunit L2 endpoint (LUNIT_FM_API_URL)
-2. AGENT_MODE=rag와 LUNIT_MCP_URL을 모두 명시했을 때만 사용하는 대회 공식 MCP endpoint
-
-일반 웹 검색, 상용 검색 API, 클라우드 벡터 DB, 원격 분석 서비스, 외부 인증 서비스에는
-의존하지 않는다. MCP가 구성되지 않아도 L2-only 폴백으로 동작한다. 컨테이너에는 .env,
-테스트, 문서, 캐시를 복사하지 않는다.
-
-Python 패키지 설치는 이미지 빌드 단계에만 필요하다. 대회 빌드 환경까지 완전 오프라인이면
-운영자가 제공하는 패키지 미러 또는 사전 빌드 이미지 정책이 추가로 필요하므로 공식 제출
-문서와 확인해야 한다.
+Image에는 `.env`, test, docs, cache, canonical Markdown를 복사하지 않는다. `GET /readyz`는
+static manifest 상태와 “live canary required”를 보여 줄 뿐 외부 dependency를 preflight하지
+않는다. 제출 직전 Lunit network에서 model, MCP discovery/schema, 실제 one-call Retrieval과
+final answer를 포함한 live canary가 필요하다.
 
 ## 보안과 개인정보
 
@@ -119,11 +284,10 @@ Python 패키지 설치는 이미지 빌드 단계에만 필요하다. 대회 �
 - 의료 질문, 대화, MCP 근거 본문, Authorization 헤더는 기록하거나 저장하지 않는다.
 - MCP 결과와 사용자 입력은 시스템 지시가 아닌 신뢰하지 않는 데이터로 취급한다.
 
-## 동시성과 자원 제한
+## 벤치마크의 위치
 
-- 모든 L2/MCP I/O는 비동기다.
-- 요청별 오케스트레이터와 검색 상태를 사용해 대화 간 상태 누출을 막는다.
-- L2 HTTP 연결 풀만 FastAPI lifespan 동안 공유한다.
-- MCP 호출 횟수(실행당 최대 2회), 개별 도구 결과, 전체 근거 크기를 제한한다.
-- 선택적 검색은 전체 요청 제한의 45%(최대 45초)까지만 사용해 직접 L2 폴백 시간을 남긴다.
-- 영구 대화 저장이나 교차 요청 캐시는 사용하지 않는다.
+[`docs/benchmarks/2026-08-21-l2-auth-local.md`](benchmarks/2026-08-21-l2-auth-local.md)는
+16 concurrent request direct-only 대조군의 실 L2 연결·지연시간 gate다. 원 기록은 변경하지
+않으며 현재 hybrid의 MCP 품질 또는 공식 HealthBench score로 재해석하지 않는다. Hybrid는 그
+대조군의 one-call fast path를 일반 질문에 유지하고 source-dependent subset에만 추가 비용을
+쓰도록 설계했다.
