@@ -245,6 +245,85 @@ async def test_explicit_invented_marker_corrects_once_without_treating_bp_as_cit
     assert len(l2.calls) == 2
 
 
+async def test_multiline_bracketed_marker_cannot_hide_an_invented_suffix():
+    l2 = ScriptedL2(
+        [
+            L2Completion(
+                content="지원 근거 uid\n[cite_uid:\nuid\ninvented-id\n]\n후속 답변"
+            ),
+            L2Completion(content="지원 근거 [cite_uid: uid]\n후속 답변"),
+        ]
+    )
+
+    assert await GenerationEngine(l2, settings()).grounded_answer(
+        [ChatMessage(role="user", content="근거를 알려줘")],
+        evidence_result(cite_uid="uid"),
+        RequestDeadline.start(),
+    ) == "지원 근거 [cite_uid: uid]\n후속 답변"
+    assert len(l2.calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("cite_uid", "answer"),
+    [
+        ("uid", "[cite_uid:\nuid\n]\n후속 답변"),
+        ("multi\nline uid", "[cite_uid:\nmulti\nline uid\n]\n후속 답변"),
+    ],
+)
+async def test_complete_multiline_bracketed_selected_uid_is_valid(cite_uid, answer):
+    l2 = ScriptedL2([L2Completion(content=answer)])
+
+    assert await GenerationEngine(l2, settings()).grounded_answer(
+        [ChatMessage(role="user", content="근거를 알려줘")],
+        evidence_result(cite_uid=cite_uid),
+        RequestDeadline.start(),
+    ) == answer
+    assert len(l2.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        'citation: "uid"\n후속 답변',
+        "cite_uid: uid\n후속 답변",
+    ],
+)
+async def test_quoted_and_line_markers_validate_their_complete_payload(answer):
+    l2 = ScriptedL2([L2Completion(content=answer)])
+
+    assert await GenerationEngine(l2, settings()).grounded_answer(
+        [ChatMessage(role="user", content="근거를 알려줘")],
+        evidence_result(cite_uid="uid"),
+        RequestDeadline.start(),
+    ) == answer
+    assert len(l2.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "first_answer",
+    [
+        "지원 근거 uid\n[cite_uid:\nuid",
+        "[cite_uid: [uid]]",
+        "[cite_uid: uid]\n[cite_uid: invented-id]",
+        "[cite_uid: invented-uid]",
+    ],
+)
+async def test_malformed_nested_or_multiple_explicit_markers_correct_once(first_answer):
+    l2 = ScriptedL2(
+        [
+            L2Completion(content=first_answer),
+            L2Completion(content="[cite_uid: uid]\n후속 답변"),
+        ]
+    )
+
+    assert await GenerationEngine(l2, settings()).grounded_answer(
+        [ChatMessage(role="user", content="근거를 알려줘")],
+        evidence_result(cite_uid="uid"),
+        RequestDeadline.start(),
+    ) == "[cite_uid: uid]\n후속 답변"
+    assert len(l2.calls) == 2
+
+
 async def test_citation_validation_requires_exact_uid_boundary_not_a_substring():
     l2 = ScriptedL2(
         [
