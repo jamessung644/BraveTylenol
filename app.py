@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from typing import Protocol
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 
 from harness.config import Settings
 from harness.errors import (
@@ -51,14 +51,14 @@ def create_app(
 
     application = FastAPI(lifespan=lifespan)
 
-    def build_orchestrator() -> ChatOrchestrator:
+    def build_orchestrator(request_settings: Settings) -> ChatOrchestrator:
         http_client = getattr(application.state, "l2_http_client", None)
-        l2 = L2Client(resolved_settings, http_client=http_client)
-        if resolved_settings.harness_mode == "passthrough":
+        l2 = L2Client(request_settings, http_client=http_client)
+        if request_settings.harness_mode == "passthrough":
             return ChatOrchestrator(l2=l2, generation=None, mode="passthrough")
-        retrieval = RetrievalEngine(l2, MCPClient(resolved_settings), resolved_settings)
+        retrieval = RetrievalEngine(l2, MCPClient(request_settings), request_settings)
         generation = GenerationEngine(l2, retrieval)
-        return ChatOrchestrator(l2=l2, generation=generation, mode=resolved_settings.harness_mode)
+        return ChatOrchestrator(l2=l2, generation=generation, mode=request_settings.harness_mode)
 
     @application.get("/v1/models")
     async def list_models() -> dict[str, object]:
@@ -72,13 +72,23 @@ def create_app(
         response_model=ChatCompletionResponse,
         response_model_exclude_none=True,
     )
-    async def create_chat_completion(request: ChatCompletionRequest) -> ChatCompletionResponse:
+    async def create_chat_completion(
+        request: ChatCompletionRequest,
+        authorization: str | None = Header(default=None),
+    ) -> ChatCompletionResponse:
         if request.stream:
             raise HTTPException(status_code=400, detail="Streaming is not supported")
-        if not resolved_settings.api_key:
+        bearer_token = None
+        if authorization:
+            scheme, separator, token = authorization.partition(" ")
+            if separator and scheme.lower() == "bearer" and token.strip():
+                bearer_token = token.strip()
+        request_api_key = resolved_settings.api_key or bearer_token
+        if not request_api_key:
             raise HTTPException(status_code=503, detail="LUNIT_FM_API_KEY is not configured")
+        request_settings = resolved_settings.model_copy(update={"api_key": request_api_key})
         try:
-            active_orchestrator = resolved_orchestrator or build_orchestrator()
+            active_orchestrator = resolved_orchestrator or build_orchestrator(request_settings)
             async with asyncio.timeout(resolved_settings.upstream_timeout_seconds):
                 answer = await active_orchestrator.answer(request.messages)
         except TimeoutError as error:

@@ -65,6 +65,33 @@ async def test_chat_requires_configured_key(settings_without_key, fake_orchestra
     assert fake_orchestrator.calls == []
 
 
+async def test_chat_forwards_request_bearer_token_to_l2_when_environment_key_is_missing(
+    settings_without_key, monkeypatch
+):
+    class BearerAuthenticatedL2:
+        def __init__(self, settings, *, http_client=None):
+            del http_client
+            if settings.api_key != "lunit_request_key":
+                raise AssertionError("request bearer token was not forwarded to L2")
+            self.last_usage = TokenUsage()
+
+        async def complete(self, *, messages, tools=None, tool_choice=None):
+            del messages, tools, tool_choice
+            return L2Completion(content="인증된 L2 응답")
+
+    monkeypatch.setattr(app_module, "L2Client", BearerAuthenticatedL2)
+    app = create_app(settings=settings_without_key)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer lunit_request_key"},
+            json={"model": "team-chatbot", "messages": [{"role": "user", "content": "안녕"}]},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "인증된 L2 응답"
+
+
 async def test_chat_returns_openai_compatible_completion(settings_with_key, fake_orchestrator):
     app = create_app(settings=settings_with_key, orchestrator=fake_orchestrator)
     before = int(time.time())
