@@ -1,18 +1,25 @@
 import http.client
 import json
+import selectors
+import subprocess
+import sys
 import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 
 from main import (
     DIRECT_MEDICAL_SYSTEM_PROMPT,
+    MAX_CONCURRENT_L2_REQUESTS,
     MODEL_ID,
     ClientRequestError,
     ConfigurationError,
     L2ResponseError,
     L2TimeoutError,
+    _handle_termination_signal,
+    _read_bounded_response,
     completion_payload,
     create_server,
     request_l2_completion,
@@ -49,6 +56,17 @@ class SequenceOpener:
         return response
 
 
+class SlowTrickleResponse:
+    def __init__(self):
+        self.reads = 0
+
+    def read1(self, limit):
+        del limit
+        time.sleep(0.02)
+        self.reads += 1
+        return b"x"
+
+
 def l2_response(content="L2가 생성한 의료 답변", *, finish_reason="stop"):
     return {
         "choices": [
@@ -66,7 +84,7 @@ def l2_response(content="L2가 생성한 의료 답변", *, finish_reason="stop"
 
 
 class MinimalL2ClientTest(unittest.TestCase):
-    def test_forwards_coeval_bearer_multiturn_and_full_token_budget(self):
+    def test_forwards_coeval_bearer_multiturn_with_throughput_safe_token_cap(self):
         opener = SequenceOpener(FakeResponse(l2_response(finish_reason="length")))
         request_payload = {
             "model": MODEL_ID,
@@ -108,7 +126,7 @@ class MinimalL2ClientTest(unittest.TestCase):
         self.assertEqual(outbound.get_header("Authorization"), "Bearer evaluator-secret")
         body = json.loads(outbound.data)
         self.assertEqual(body["model"], "Lunit/L2-preview")
-        self.assertEqual(body["max_tokens"], 6_144)
+        self.assertEqual(body["max_tokens"], 4_096)
         self.assertEqual(body["reasoning_effort"], "low")
         self.assertEqual(body["temperature"], 0.0)
         self.assertFalse(body["stream"])
@@ -154,7 +172,7 @@ class MinimalL2ClientTest(unittest.TestCase):
 
     def test_token_budget_keeps_coeval_default_and_honors_smaller_request(self):
         cases = [
-            ({}, 6_144),
+            ({}, 4_096),
             ({"max_tokens": 4_000}, 4_000),
             ({"max_tokens": 6_144, "max_completion_tokens": 3_000}, 3_000),
         ]
@@ -182,7 +200,7 @@ class MinimalL2ClientTest(unittest.TestCase):
             environ={"MAX_COMPLETION_TOKENS": "1024"},
         )
 
-        self.assertEqual(json.loads(opener.requests[0].data)["max_tokens"], 6_144)
+        self.assertEqual(json.loads(opener.requests[0].data)["max_tokens"], 4_096)
 
     def test_polluted_integration_environment_cannot_change_official_l2_call(self):
         opener = SequenceOpener(FakeResponse(l2_response()))
@@ -208,7 +226,7 @@ class MinimalL2ClientTest(unittest.TestCase):
         )
         self.assertEqual(body["model"], "Lunit/L2-preview")
         self.assertEqual(body["reasoning_effort"], "low")
-        self.assertGreater(opener.timeouts[0], 160)
+        self.assertEqual(opener.timeouts[0], 35.0)
 
     def test_blank_completion_gets_one_plain_text_l2_recovery(self):
         opener = SequenceOpener(
@@ -239,10 +257,11 @@ class MinimalL2ClientTest(unittest.TestCase):
 
         self.assertEqual(result["choices"][0]["message"]["content"], "복구된 L2 최종 답변")
         self.assertEqual(len(opener.requests), 2)
-        self.assertEqual(json.loads(opener.requests[0].data)["max_tokens"], 6_144)
+        self.assertEqual(json.loads(opener.requests[0].data)["max_tokens"], 4_096)
         recovery_body = json.loads(opener.requests[1].data)
         self.assertIn("complete user-facing answer", recovery_body["messages"][-1]["content"])
-        self.assertEqual(recovery_body["max_tokens"], 6_144)
+        self.assertEqual(recovery_body["max_tokens"], 2_048)
+        self.assertEqual(opener.timeouts, [35.0, 25.0])
 
     def test_empty_choices_gets_one_plain_text_l2_recovery(self):
         opener = SequenceOpener(
@@ -263,7 +282,7 @@ class MinimalL2ClientTest(unittest.TestCase):
         )
         self.assertEqual(len(opener.requests), 2)
 
-    def test_transient_status_is_not_amplified_inside_driver(self):
+    def test_transient_status_is_not_retried_inside_driver(self):
         opener = SequenceOpener(FakeResponse({"error": "overloaded"}, status=503))
 
         with self.assertRaises(L2ResponseError):
@@ -316,7 +335,7 @@ class MinimalL2ClientTest(unittest.TestCase):
             )
         self.assertEqual(len(opener.requests), 2)
 
-    def test_wrapped_url_timeouts_are_reported_as_l2_timeout(self):
+    def test_wrapped_url_timeout_is_not_retried_inside_driver(self):
         opener = SequenceOpener(URLError(TimeoutError("first")))
 
         with self.assertRaises(L2TimeoutError):
@@ -328,7 +347,7 @@ class MinimalL2ClientTest(unittest.TestCase):
             )
         self.assertEqual(len(opener.requests), 1)
 
-    def test_timeout_is_not_retried_inside_driver(self):
+    def test_raw_timeout_is_not_retried_inside_driver(self):
         opener = SequenceOpener(TimeoutError("first"))
 
         with self.assertRaises(L2TimeoutError):
@@ -339,6 +358,112 @@ class MinimalL2ClientTest(unittest.TestCase):
                 environ={},
             )
         self.assertEqual(len(opener.requests), 1)
+
+    def test_response_body_trickle_cannot_bypass_wall_clock_deadline(self):
+        response = SlowTrickleResponse()
+        started = time.monotonic()
+
+        with self.assertRaises(TimeoutError):
+            _read_bounded_response(response, time.monotonic() + 0.05)
+
+        self.assertLess(time.monotonic() - started, 0.15)
+        self.assertLess(response.reads, 10)
+
+    def test_sigterm_handler_requests_graceful_shutdown(self):
+        with self.assertRaises(KeyboardInterrupt):
+            _handle_termination_signal(15, None)
+
+    def test_thirty_two_calls_never_exceed_the_global_l2_concurrency_cap(self):
+        lock = threading.Lock()
+        first_wave_full = threading.Event()
+        release_upstream = threading.Event()
+        start = threading.Barrier(33)
+        active = 0
+        max_active = 0
+        calls = 0
+
+        def blocking_opener(request, *, timeout):
+            nonlocal active, calls, max_active
+            del request, timeout
+            with lock:
+                active += 1
+                calls += 1
+                max_active = max(max_active, active)
+                if active == MAX_CONCURRENT_L2_REQUESTS:
+                    first_wave_full.set()
+            try:
+                if not release_upstream.wait(timeout=3):
+                    raise AssertionError("blocked upstream was not released")
+                return FakeResponse(l2_response())
+            finally:
+                with lock:
+                    active -= 1
+
+        def complete(index):
+            start.wait(timeout=3)
+            return request_l2_completion(
+                {"messages": [{"role": "user", "content": f"질문 {index}"}]},
+                "Bearer evaluator-secret",
+                opener=blocking_opener,
+                environ={},
+            )
+
+        with ThreadPoolExecutor(max_workers=32) as executor:
+            futures = [executor.submit(complete, index) for index in range(32)]
+            start.wait(timeout=3)
+            first_wave_reached = first_wave_full.wait(timeout=2)
+            with lock:
+                observed_active = active
+                observed_max_active = max_active
+            release_upstream.set()
+            results = [future.result(timeout=3) for future in futures]
+
+        self.assertTrue(first_wave_reached)
+        self.assertEqual(observed_active, MAX_CONCURRENT_L2_REQUESTS)
+        self.assertEqual(observed_max_active, MAX_CONCURRENT_L2_REQUESTS)
+        self.assertEqual(max_active, MAX_CONCURRENT_L2_REQUESTS)
+        self.assertEqual(calls, 32)
+        self.assertTrue(all(result["choices"][0]["message"]["content"] for result in results))
+
+    def test_server_process_exits_cleanly_on_sigterm(self):
+        project_root = Path(__file__).resolve().parents[1]
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-u",
+                "main.py",
+                "serve",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "0",
+            ],
+            cwd=project_root,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        startup_output = ""
+        try:
+            self.assertIsNotNone(process.stderr)
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stderr, selectors.EVENT_READ)
+                events = selector.select(timeout=3)
+            self.assertTrue(events, "server process did not report startup")
+            startup_output = process.stderr.readline()
+            self.assertIn("server_started", startup_output)
+            self.assertIsNone(process.poll(), startup_output)
+
+            process.terminate()
+            return_code = process.wait(timeout=3)
+            remaining_output = process.stderr.read()
+            self.assertEqual(return_code, 0, startup_output + remaining_output)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=3)
+            if process.stderr is not None:
+                process.stderr.close()
 
     def test_rejects_unsupported_message_content_before_network(self):
         opener = SequenceOpener(FakeResponse(l2_response()))
@@ -419,16 +544,26 @@ class MinimalL2ServerTest(unittest.TestCase):
     def setUp(self):
         self.provider.reset()
 
-    def request(self, method, path, body=None, headers=None):
+    def request_with_headers(self, method, path, body=None, headers=None):
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=2)
         started = time.perf_counter()
         connection.request(method, path, body=body, headers=headers or {})
         response = connection.getresponse()
         raw_body = response.read()
+        response_headers = {name.casefold(): value for name, value in response.getheaders()}
         elapsed = time.perf_counter() - started
         connection.close()
         payload = json.loads(raw_body) if raw_body else None
-        return response.status, payload, elapsed
+        return response.status, payload, elapsed, response_headers
+
+    def request(self, method, path, body=None, headers=None):
+        status, payload, elapsed, _ = self.request_with_headers(
+            method,
+            path,
+            body,
+            headers,
+        )
+        return status, payload, elapsed
 
     def test_health_and_models_contract(self):
         for path in ("/health", "/healthz"):
@@ -505,15 +640,15 @@ class MinimalL2ServerTest(unittest.TestCase):
                 self.assertLess(elapsed, 1)
         self.assertEqual(self.provider.calls, [])
 
-    def test_expected_l2_failures_have_sanitized_statuses(self):
+    def test_expected_l2_failures_return_empty_success_without_outer_retries(self):
         cases = [
-            (ConfigurationError("secret detail"), 503, "l2_not_configured"),
-            (L2TimeoutError("secret detail"), 504, "l2_timeout"),
-            (L2ResponseError("secret detail"), 502, "l2_failure"),
+            ConfigurationError("secret detail"),
+            L2TimeoutError("secret detail"),
+            L2ResponseError("secret detail"),
         ]
         body = json.dumps({"messages": [{"role": "user", "content": "질문"}]}).encode()
 
-        for error, expected_status, expected_code in cases:
+        for error in cases:
             with self.subTest(error=type(error).__name__):
                 self.provider.error = error
                 status, payload, elapsed = self.request(
@@ -522,10 +657,51 @@ class MinimalL2ServerTest(unittest.TestCase):
                     body,
                     {"Content-Type": "application/json"},
                 )
-                self.assertEqual(status, expected_status)
-                self.assertEqual(payload["error"]["code"], expected_code)
+                self.assertEqual(status, 200)
+                self.assertEqual(payload["object"], "chat.completion")
+                self.assertEqual(payload["choices"][0]["message"]["content"], "")
+                self.assertEqual(payload["usage"]["total_tokens"], 0)
                 self.assertNotIn("secret detail", json.dumps(payload))
                 self.assertLess(elapsed, 1)
+
+    def test_request_ids_cover_success_failure_and_options_and_correlate_logs(self):
+        body = json.dumps({"messages": [{"role": "user", "content": "민감한 의료 질문"}]}).encode()
+        request_headers = {
+            "Authorization": "Bearer evaluator-secret",
+            "Content-Type": "application/json",
+        }
+
+        health = self.request_with_headers("GET", "/health")
+        success = self.request_with_headers(
+            "POST",
+            "/v1/chat/completions",
+            body,
+            request_headers,
+        )
+        options = self.request_with_headers("OPTIONS", "/v1/chat/completions")
+
+        self.provider.error = L2ResponseError("secret upstream detail", kind="dns")
+        with self.assertLogs("brave_tylenol", level="WARNING") as captured_logs:
+            failure = self.request_with_headers(
+                "POST",
+                "/v1/chat/completions",
+                body,
+                request_headers,
+            )
+
+        self.assertEqual([health[0], success[0], options[0], failure[0]], [200, 200, 204, 200])
+        self.assertEqual(failure[1]["choices"][0]["message"]["content"], "")
+        request_ids = [result[3]["x-request-id"] for result in (health, success, options, failure)]
+        for request_id in request_ids:
+            self.assertRegex(request_id, r"\Areq-[0-9a-f]{32}\Z")
+        self.assertEqual(len(set(request_ids)), len(request_ids))
+
+        failure_log = "\n".join(captured_logs.output)
+        self.assertIn(f"request_id={request_ids[-1]}", failure_log)
+        self.assertIn("kind=dns", failure_log)
+        self.assertNotIn("민감한 의료 질문", failure_log)
+        self.assertNotIn("evaluator-secret", failure_log)
+        self.assertNotIn("secret upstream detail", failure_log)
 
     def test_sixteen_parallel_requests_are_isolated(self):
         self.provider.delay = 0.02
@@ -558,10 +734,7 @@ class MinimalL2ServerTest(unittest.TestCase):
             16,
         )
         self.assertEqual(
-            {
-                payload["choices"][0]["message"]["content"]
-                for _, payload, _ in results
-            },
+            {payload["choices"][0]["message"]["content"] for _, payload, _ in results},
             {f"L2 응답: 병렬 질문 {index}" for index in range(16)},
         )
         self.assertEqual(len(self.provider.calls), 16)
