@@ -5,6 +5,7 @@ import pytest
 
 from app.config import Settings
 from app.fast_harness import FastL2Harness, L2ResponseError
+from app.fast_policy import choose_generation_profile
 
 
 def settings() -> Settings:
@@ -80,6 +81,22 @@ async def test_emergency_gets_larger_budget_and_urgent_short_prompt():
     assert "at most 180 words" in payload["messages"][0]["content"]
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "숨쉬기가 너무 힘들어요.",
+        "가슴 압박이 팔로 퍼져요.",
+        "얼굴이 처지고 말이 어눌해요.",
+        "약을 한 병 전부 먹었어요.",
+    ],
+)
+def test_korean_emergency_paraphrases_get_emergency_profile(text: str):
+    profile = choose_generation_profile([{"role": "user", "content": text}])
+
+    assert profile.kind == "emergency"
+    assert profile.max_tokens == 1280
+
+
 @pytest.mark.asyncio
 async def test_long_clinical_context_gets_larger_budget():
     requests: list[httpx.Request] = []
@@ -99,7 +116,9 @@ async def test_long_clinical_context_gets_larger_budget():
     )
     await client.aclose()
 
-    assert json.loads(requests[0].content)["max_tokens"] == 1280
+    payload = json.loads(requests[0].content)
+    assert payload["max_tokens"] == 1280
+    assert "at most 180 words" in payload["messages"][0]["content"]
 
 
 @pytest.mark.asyncio
