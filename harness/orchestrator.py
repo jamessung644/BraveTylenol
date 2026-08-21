@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import Any, Literal
 
 from harness.errors import MalformedUpstreamResponseError, RetrievalError
+from harness.prompts import PASSTHROUGH_SYSTEM_PROMPT
 from harness.schemas import ChatMessage, TokenUsage
 
 logger = logging.getLogger(__name__)
@@ -22,7 +23,11 @@ class ChatOrchestrator:
 
     async def answer(self, messages: Sequence[ChatMessage]) -> str:
         if self._mode == "passthrough":
-            return await self._direct(messages)
+            bounded_messages = [
+                ChatMessage(role="system", content=PASSTHROUGH_SYSTEM_PROMPT),
+                *messages,
+            ]
+            return await self._direct(bounded_messages)
 
         try:
             if self._generation is None:

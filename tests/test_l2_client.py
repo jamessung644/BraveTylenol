@@ -37,6 +37,9 @@ async def test_complete_preserves_messages_and_tools(settings_with_key):
 
     assert seen["authorization"] == "Bearer test-key"
     assert seen["body"]["model"] == "Lunit/L2-preview"
+    assert seen["body"]["max_tokens"] == 3072
+    assert seen["body"]["reasoning_effort"] == "low"
+    assert seen["body"]["temperature"] == 0.0
     assert seen["body"]["messages"] == [{"role": "user", "content": "질문"}]
     assert seen["body"]["tool_choice"] == "auto"
     assert result.content == "확인했습니다."
@@ -138,10 +141,81 @@ async def test_complete_rejects_missing_choices(settings_with_key):
             await L2Client(settings_with_key, http_client=http_client).complete(messages=[{"role": "user", "content": "질문"}])
 
 
-async def test_complete_rejects_blank_completion_without_tool_calls(settings_with_key):
+async def test_complete_recovers_blank_direct_completion_once(settings_with_key):
+    requests = []
+
     async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "   ",
+                                "reasoning": "The patient needs clear red flags and next steps.",
+                            },
+                            "finish_reason": "length",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 3072, "total_tokens": 3082},
+                },
+            )
+        return httpx.Response(200, json=completion_payload({"role": "assistant", "content": "최종 답변"}))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        result = await L2Client(settings_with_key, http_client=http_client).complete(
+            messages=[{"role": "user", "content": "질문"}]
+        )
+
+    assert result.content == "최종 답변"
+    assert len(requests) == 2
+    assert requests[1]["max_tokens"] == 1536
+    assert "The patient needs clear red flags" in requests[1]["messages"][-2]["content"]
+    assert "final user-facing answer" in requests[1]["messages"][-1]["content"]
+
+
+async def test_complete_rejects_blank_direct_completion_after_one_recovery(settings_with_key):
+    attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
         return httpx.Response(200, json=completion_payload({"role": "assistant", "content": "   "}))
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
         with pytest.raises(MalformedUpstreamResponseError):
-            await L2Client(settings_with_key, http_client=http_client).complete(messages=[{"role": "user", "content": "질문"}])
+            await L2Client(settings_with_key, http_client=http_client).complete(
+                messages=[{"role": "user", "content": "질문"}]
+            )
+
+    assert attempts == 2
+
+
+async def test_complete_does_not_recover_blank_tool_planner_completion(settings_with_key):
+    attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(200, json=completion_payload({"role": "assistant", "content": "   "}))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        with pytest.raises(MalformedUpstreamResponseError):
+            await L2Client(settings_with_key, http_client=http_client).complete(
+                messages=[{"role": "user", "content": "질문"}],
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "retrieve",
+                            "description": "search",
+                            "parameters": {"type": "object"},
+                        },
+                    }
+                ],
+            )
+
+    assert attempts == 1
