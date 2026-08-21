@@ -138,7 +138,7 @@ async def test_fast_mode_ignores_mcp_and_forwards_the_full_conversation_once(mon
     assert response.status_code == 200
     assert len(RecordingL2.calls) == 1
     assert RecordingL2.calls[0]["messages"][1:] == conversation
-    assert RecordingL2.calls[0]["max_tokens"] == 1024
+    assert RecordingL2.calls[0]["max_tokens"] == 768
 
 
 async def test_chat_rejects_non_bearer_authorization(monkeypatch):

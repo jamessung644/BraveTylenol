@@ -55,25 +55,25 @@ def choose_generation_profile(messages: Sequence[ChatMessage]) -> GenerationProf
     if _EMERGENCY.search(user_text):
         return GenerationProfile(
             kind="emergency",
-            max_tokens=1536,
+            max_tokens=1280,
             system_prompt=(
                 f"{_BASE_PROMPT}\n\nThis may be an emergency: put urgent action first, "
-                "then give brief safe steps while help is coming. Aim for at most 240 words."
+                "then give brief safe steps while help is coming. Aim for at most 180 words."
             ),
         )
 
     if len(user_text) >= 700 or len(messages) >= 5 or _COMPLEX.search(user_text):
         return GenerationProfile(
             kind="complex",
-            max_tokens=1536,
+            max_tokens=1280,
             system_prompt=(
                 f"{_BASE_PROMPT}\n\nSynthesize the clinical context without restating it. "
-                "Prioritize the decision-relevant details. Aim for at most 240 words."
+                "Prioritize the decision-relevant details. Aim for at most 180 words."
             ),
         )
 
     return GenerationProfile(
         kind="routine",
-        max_tokens=1024,
-        system_prompt=f"{_BASE_PROMPT}\n\nAim for at most 160 words.",
+        max_tokens=768,
+        system_prompt=f"{_BASE_PROMPT}\n\nAim for at most 120 words.",
     )

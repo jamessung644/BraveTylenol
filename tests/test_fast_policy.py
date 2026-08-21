@@ -15,8 +15,9 @@ def test_unresponsive_patient_uses_emergency_profile():
     )
 
     assert profile.kind == "emergency"
-    assert profile.max_tokens == 1536
+    assert profile.max_tokens == 1280
     assert "urgent action first" in profile.system_prompt
+    assert "at most 180 words" in profile.system_prompt
 
 
 def test_short_routine_question_uses_smallest_profile():
@@ -25,8 +26,9 @@ def test_short_routine_question_uses_smallest_profile():
     )
 
     assert profile.kind == "routine"
-    assert profile.max_tokens == 1024
+    assert profile.max_tokens == 768
     assert "If an emergency is plausible" in profile.system_prompt
+    assert "at most 120 words" in profile.system_prompt
 
 
 def test_long_clinical_context_keeps_room_for_a_complete_answer():
@@ -35,7 +37,7 @@ def test_long_clinical_context_keeps_room_for_a_complete_answer():
     )
 
     assert profile.kind == "complex"
-    assert profile.max_tokens == 1536
+    assert profile.max_tokens == 1280
 
 
 def test_korean_emergency_language_is_detected():
@@ -63,4 +65,4 @@ def test_common_emergency_paraphrases_get_the_larger_budget(text):
     profile = choose_generation_profile([ChatMessage(role="user", content=text)])
 
     assert profile.kind == "emergency"
-    assert profile.max_tokens == 1536
+    assert profile.max_tokens == 1280
