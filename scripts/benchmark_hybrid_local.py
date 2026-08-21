@@ -342,8 +342,12 @@ def run_benchmark() -> dict[str, Any]:
     for vector in ROUTE_VECTORS:
         actual_route = _classify_route(vector)
         route_counts[actual_route] += 1
-        l2_calls = 2 if actual_route == "rag" else 1
         mcp_calls = vector.rag_mcp_calls if actual_route == "rag" else 0
+        # Successful RAG minimum: one Generation decision, one Retrieval planner
+        # turn per remote MCP call, one local-finalizer planner turn, and one final
+        # Generation answer. Forced retries and answer recovery are intentionally
+        # excluded and must only increase this lower bound.
+        l2_calls = mcp_calls + 3 if actual_route == "rag" else 1
         latency_ms = (
             _VIRTUAL_REQUEST_OVERHEAD_MS
             + l2_calls * _VIRTUAL_L2_CALL_MS
@@ -395,6 +399,7 @@ def run_benchmark() -> dict[str, Any]:
             "l2_call_ms": _VIRTUAL_L2_CALL_MS,
             "mcp_call_ms": _VIRTUAL_MCP_CALL_MS,
             "request_overhead_ms": _VIRTUAL_REQUEST_OVERHEAD_MS,
+            "scope": "successful-path minimum; retries and recovery excluded",
             "warning": "fixture accounting only; not observed latency",
         },
         "summary": {

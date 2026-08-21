@@ -1,8 +1,8 @@
 # CoEval local hybrid routing gate
 
 - Date: 2026-08-22 (Asia/Seoul)
-- Variant: `integration/mcp-024-hybrid` working tree
-- Baseline ancestry: `baseline/024-hybrid` at `4b130bcfcffa26f3e31fab69374a0dbacbc7cf68`
+- Variant: `improve/healthbench-60` candidate
+- Baseline ancestry: validated restore commit `7707b1c021d7a0cdea348f7de7119e8788e0bf4b`
 - Measurement class: secret-free deterministic local simulation
 - Network, L2, MCP, judge, and dashboard calls: none
 
@@ -86,19 +86,22 @@ JSON report; it is not a passing release gate.
 ## Local fake result
 
 The virtual clock assigns 3,000 ms per L2 call, 1,000 ms per MCP call, and 100
-ms request overhead. These values exist solely for stable cost accounting and
-are not observed or predicted production latency.
+ms request overhead. A successful RAG path counts one Generation decision,
+one Retrieval planner turn per remote MCP call, one local-finalizer planner
+turn, and one final Generation call. This is a lower bound: forced-tool retries
+and final-answer recovery only add calls. The values exist solely for stable
+cost accounting and are not observed or predicted production latency.
 
 | Metric | Deterministic fixture result |
 | --- | ---: |
 | Route matches | 16 / 16 |
-| Simulated L2 calls | 24 total / 1.50 per request |
+| Simulated L2 calls | 44 total / 2.75 per request |
 | Simulated MCP calls | 12 total / 0.75 per request |
 | Simulated MCP calls per RAG request | 1.50 |
 | Fake observed-cite yield | 7 / 8 RAG requests (87.5%) |
 | Direct/emergency simulated p50 / p95 / max | 3.10 / 3.10 / 3.10 s |
-| RAG simulated p50 / p95 / max | 7.10 / 8.75 / 9.10 s |
-| 16-way no-contention simulated wall time | 9.10 s |
+| RAG simulated p50 / p95 / max | 13.10 / 19.70 / 21.10 s |
+| 16-way no-contention simulated wall time | 21.10 s |
 
 ## Release interpretation
 

@@ -58,15 +58,21 @@ def test_fixed_sixteen_way_matrix_matches_router_policy():
 
 
 def test_domain_specific_fake_mcp_call_profiles_are_fixed_before_measurement():
+    rows = {row["id"]: row for row in run_benchmark()["vectors"]}
     for vector in ROUTE_VECTORS:
         if vector.expected_route != "rag":
             assert vector.mcp_profile == "none"
             assert vector.rag_mcp_calls == 0
+            assert rows[vector.vector_id]["simulated_l2_calls"] == 1
         elif vector.mcp_profile == "structured":
             assert vector.rag_mcp_calls == 1
+            assert rows[vector.vector_id]["simulated_l2_calls"] == 4
         else:
             assert vector.mcp_profile == "hierarchical"
             assert vector.rag_mcp_calls in {2, 3}
+            assert rows[vector.vector_id]["simulated_l2_calls"] == (
+                vector.rag_mcp_calls + 3
+            )
 
 
 def test_known_high_risk_router_regressions_are_explicit_gate_vectors():
@@ -95,27 +101,27 @@ def test_virtual_latency_call_and_citation_accounting_is_deterministic():
         },
         "rag": {
             "count": 8,
-            "p50_ms": 7100.0,
-            "p95_ms": 8750.0,
-            "max_ms": 9100,
+            "p50_ms": 13100.0,
+            "p95_ms": 19700.0,
+            "max_ms": 21100,
         },
         "all": {
             "count": 16,
-            "p50_ms": 5100.0,
-            "p95_ms": 8350.0,
-            "max_ms": 9100,
+            "p50_ms": 8100.0,
+            "p95_ms": 18100.0,
+            "max_ms": 21100,
         },
     }
     assert summary["simulated_calls"] == {
-        "l2_total": 24,
-        "l2_per_request": 1.5,
+        "l2_total": 44,
+        "l2_per_request": 2.75,
         "mcp_total": 12,
         "mcp_per_request": 0.75,
         "mcp_per_rag_request": 1.5,
     }
     assert summary["simulated_batch"] == {
         "concurrency_shape": 16,
-        "wall_ms": 9100,
+        "wall_ms": 21100,
         "model": "all fixtures start at t=0 with no resource contention",
     }
     assert summary["fake_fixture_cite_yield"] == {
@@ -139,6 +145,9 @@ def test_report_marks_every_nonlocal_result_as_unmeasured():
     }
     assert report["virtual_cost_model"]["warning"] == (
         "fixture accounting only; not observed latency"
+    )
+    assert report["virtual_cost_model"]["scope"] == (
+        "successful-path minimum; retries and recovery excluded"
     )
 
 
