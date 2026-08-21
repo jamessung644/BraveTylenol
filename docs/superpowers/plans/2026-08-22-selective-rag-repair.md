@@ -1,10 +1,10 @@
-# Selective RAG and L2 Repair Implementation Plan
+# Selective RAG Single-Pass Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add one bounded selective MCP lookup and a narrowly gated second-L2 repair path without changing the fast direct default.
+**Goal:** Add one bounded selective MCP lookup while keeping every request to one L2 generation.
 
-**Architecture:** Extend the zero-dependency `main.py` gateway with deterministic routing, bounded JSON-RPC MCP access, and fail-open answer repair. Preserve the 150-second request deadline and current OpenAI response contract.
+**Architecture:** Extend the zero-dependency `main.py` gateway with deterministic routing and bounded JSON-RPC MCP access. Preserve the 150-second request deadline and current OpenAI response contract.
 
 **Tech Stack:** Python 3.13 standard library, HTTP JSON/SSE, `ThreadingHTTPServer`, Docker.
 
@@ -15,11 +15,11 @@
 - Keep the default path to exactly one L2 call.
 - Use no new runtime dependencies.
 - Use at most one MCP call with a 4-second timeout and 3,000-character evidence cap.
-- Use repair only after a primary answer completes within 85 seconds, with at most 55 seconds for repair.
+- Never make a second L2 call.
 - Preserve an end-to-end request deadline of 150 seconds.
-- Fail open to the primary answer.
+- Fail open from MCP to the direct L2 path.
 - Do not log credentials or raw conversations.
-- Per user instruction, do not execute automated tests before the urgent push.
+- Run fast local unit and static checks without live external API calls.
 
 ---
 
@@ -40,23 +40,19 @@
 - [ ] Confirm by static inspection that failures return to the direct path.
 - [ ] Commit the grounding change.
 
-### Task 2: Narrow fail-open L2 answer repair
+### Task 2: Enforce one L2 generation
 
 **Files:**
 - Modify: `main.py`
 - Test definition (execution skipped by user): `tests/test_selective_grounding.py`
 
 **Interfaces:**
-- Produces: `_needs_answer_repair(messages)`, `_try_answer_repair(...)`.
-- Consumes: original messages, primary answer, API key, shared deadline, and HTTP opener.
+- Consumes: original messages, optional MCP evidence, API key, shared deadline, and HTTP opener.
 
-- [ ] Add a deterministic multi-requirement classifier that excludes emergencies, source routes, and exact-format tasks.
-- [ ] Preserve the primary answer before considering repair.
-- [ ] Run repair only when elapsed time is at most 85 seconds and cap repair to the remaining deadline and 55 seconds.
-- [ ] Ask L2 to preserve correct material and return a complete repaired final answer within 1,536 tokens.
-- [ ] Return the primary answer on every repair error or blank response.
-- [ ] Confirm by static inspection that ordinary requests still make one upstream L2 call.
-- [ ] Commit the repair change.
+- [ ] Remove all conditional answer-repair and second-generation paths.
+- [ ] Confirm complex and source-routed requests make exactly one upstream L2 call.
+- [ ] Keep MCP failures fail-open to the direct single-L2 path.
+- [ ] Commit the single-pass change.
 
 ### Task 3: Documentation and urgent deployment
 
@@ -67,10 +63,9 @@
 - Consumes: the final runtime constants and routing behavior.
 - Produces: operator documentation and submission branch SHA.
 
-- [ ] Document the direct-first, one-MCP, optional-repair behavior and hard budgets.
-- [ ] Skip automated test execution as explicitly requested.
-- [ ] Inspect `git diff --check`, the changed-file list, Docker copy target, and Git status only.
+- [ ] Document the direct-first, one-MCP, one-L2 behavior and hard budgets.
+- [ ] Run the local unit suite, Ruff, and `git diff --check` without live API calls.
+- [ ] Inspect the changed-file list, Docker copy target, and Git status.
 - [ ] Commit all tracked changes.
 - [ ] Push the same HEAD to `main`, `lunit/hackathon-submission`, and `candidate/fast-single-pass-50`.
 - [ ] Report the exact 40-character SHA and model name `team-chatbot`.
-

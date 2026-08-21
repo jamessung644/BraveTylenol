@@ -31,9 +31,6 @@ L2_MAX_TOKENS = 4_096
 MCP_TIMEOUT_SECONDS = 4.0
 MCP_MAX_RESPONSE_BYTES = 512_000
 MCP_MAX_EVIDENCE_CHARS = 3_000
-REPAIR_ELIGIBLE_SECONDS = 85.0
-REPAIR_TIMEOUT_SECONDS = 55.0
-REPAIR_MAX_TOKENS = 1_536
 MAX_API_KEY_LENGTH = 4_096
 MAX_CONCURRENT_L2_REQUESTS = 16
 MAX_UPSTREAM_RESPONSE_BYTES = 4_000_000
@@ -108,13 +105,6 @@ briefly only when material.
 Avoid generic disclaimers, unnecessary alarm, repetition, and irrelevant detail. Before
 finalizing, silently check completeness, accuracy, context awareness, communication quality,
 and instruction following. Return only the final answer."""
-ANSWER_REPAIR_SYSTEM_PROMPT = """You are the final medical answer editor. Return only a
-complete replacement answer to the user, in the user's requested language and format. Preserve
-every correct and useful part of the draft. Repair only material omissions or unsafe ambiguity:
-requested deliverables, case-specific urgency and disposition, relevant red flags, differential
-reasoning, tests, medication safety, follow-up, uncertainty, or supplied-data fidelity. Do not add
-generic disclaimers, invented facts, fabricated citations, internal analysis, or commentary about
-the draft. Prefer a concise answer unless the request explicitly requires detail."""
 _L2_REQUEST_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_L2_REQUESTS)
 
 logging.basicConfig(
@@ -221,7 +211,7 @@ def request_l2_or_fallback(
     mcp_provider: MCPProvider | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Return an L2-authored completion with optional bounded grounding/repair."""
+    """Return one L2-authored completion with optional bounded grounding."""
 
     started = time.monotonic()
     deadline = started + L2_TOTAL_TIMEOUT_SECONDS
@@ -288,22 +278,6 @@ def request_l2_or_fallback(
         except Exception:
             _raise_l2_error("malformed_or_blank", started)
 
-        elapsed = time.monotonic() - started
-        if (
-            route is None
-            and elapsed <= REPAIR_ELIGIBLE_SECONDS
-            and _needs_answer_repair(messages)
-        ):
-            repaired = _try_answer_repair(
-                messages=messages,
-                primary_answer=content,
-                api_key=api_key,
-                deadline=deadline,
-                opener=active_opener,
-            )
-            if repaired is not None:
-                content, repair_usage = repaired
-                usage = repair_usage or usage
         duration_ms = max(0, round((time.monotonic() - started) * 1_000))
         completion_tokens = usage.get("completion_tokens", 0) if isinstance(usage, Mapping) else 0
         LOGGER.info(
@@ -314,102 +288,6 @@ def request_l2_or_fallback(
         return completion_payload(content, usage=usage)
     finally:
         _L2_REQUEST_SLOTS.release()
-
-
-def _try_answer_repair(
-    *,
-    messages: Sequence[Mapping[str, str]],
-    primary_answer: str,
-    api_key: str,
-    deadline: float,
-    opener: Callable[..., Any],
-) -> tuple[str, Mapping[str, Any] | None] | None:
-    """Use remaining time for a narrow quality repair, never invalidating the draft."""
-
-    repair_deadline = min(deadline, time.monotonic() + REPAIR_TIMEOUT_SECONDS)
-    timeout = repair_deadline - time.monotonic()
-    if timeout <= 0:
-        return None
-    repair_messages = _upstream_messages(messages)
-    repair_messages.append({"role": "assistant", "content": primary_answer})
-    repair_messages.append(
-        {
-            "role": "system",
-            "content": ANSWER_REPAIR_SYSTEM_PROMPT,
-        }
-    )
-    payload = {
-        "model": UPSTREAM_MODEL_ID,
-        "messages": repair_messages,
-        "max_tokens": REPAIR_MAX_TOKENS,
-        "reasoning_effort": "low",
-        "temperature": 0.0,
-        "stream": False,
-    }
-    try:
-        status, raw = _post_json(
-            api_key=api_key,
-            payload=payload,
-            timeout=timeout,
-            deadline=repair_deadline,
-            opener=opener,
-        )
-        if not 200 <= status < 300:
-            return None
-        repaired, usage = _parse_l2_completion(raw)
-        LOGGER.info("answer_repair_success answer_chars=%d", len(repaired))
-        return repaired, usage
-    except HTTPError as error:
-        error.close()
-    except Exception:
-        pass
-    LOGGER.warning("answer_repair_skip kind=unavailable")
-    return None
-
-
-def _needs_answer_repair(messages: Sequence[Mapping[str, str]]) -> bool:
-    """Gate the second L2 call to the small, high-rubric-complexity tail."""
-
-    latest = next(
-        (
-            message.get("content", "")
-            for message in reversed(messages)
-            if message.get("role") == "user"
-        ),
-        "",
-    )
-    if len(latest) < 180:
-        return False
-    if re.search(
-        r"(?:JSON|CSV|XML|schema|table only|translate|rewrite|proofread|"
-        r"번역|교정|다시\s*써|표만|형식만|코드만)",
-        latest,
-        re.I,
-    ):
-        return False
-    if re.search(
-        r"(?:can't breathe|cannot breathe|severe chest pain|unconscious|overdose|"
-        r"stroke symptoms|suicidal|heavy bleeding|숨을\s*못|의식이\s*없|"
-        r"심한\s*흉통|과다\s*복용|자살|대량\s*출혈)",
-        latest,
-        re.I,
-    ):
-        return False
-
-    dimensions = (
-        r"가능한\s*원인|감별\s*진단|differential|possible causes?",
-        r"조치|관리|치료|management|what (?:to|should I) do|next steps?",
-        r"위험\s*신호|red flags?|when (?:is it|to seek) emergency|응급실",
-        r"병원|진료|의사|follow[- ]?up|reassess|경과\s*관찰",
-        r"부작용|이상\s*반응|side effects?|adverse",
-        r"상호작용|병용|interactions?|금기|contraindications?",
-        r"검사|진단\s*방법|tests?|workup|evaluation",
-        r"우선\s*순위|구분|비교|장단점|prioriti[sz]e|compare|tradeoffs?",
-    )
-    count = sum(bool(re.search(pattern, latest, re.I)) for pattern in dimensions)
-    user_turns = sum(message.get("role") == "user" for message in messages)
-    conversation_chars = sum(len(message.get("content", "")) for message in messages)
-    return count >= 4 or (count >= 3 and user_turns >= 2 and conversation_chars >= 600)
 
 
 def request_mcp_evidence(
@@ -756,7 +634,25 @@ def _extract_product_name(text: str) -> str | None:
         text,
         re.I,
     )
-    return contextual.group(1) if contextual else None
+    if not contextual:
+        return None
+    candidate = contextual.group(1)
+    generic_terms = {
+        "common",
+        "expected",
+        "known",
+        "possible",
+        "serious",
+        "가능한",
+        "나타나는",
+        "알려진",
+        "약물",
+        "예상되는",
+        "일반적인",
+        "주요",
+        "흔한",
+    }
+    return None if candidate.casefold() in generic_terms else candidate
 
 
 def _contains_direct_identifier(text: str) -> bool:
