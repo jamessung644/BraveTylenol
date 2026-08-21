@@ -236,6 +236,74 @@ async def test_complete_rejects_blank_after_one_recovery(monkeypatch):
     assert attempts == 2
 
 
+async def test_complete_recovers_blank_final_submission_once(monkeypatch):
+    settings = settings_with_key(monkeypatch)
+    requests = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": None,
+                                "reasoning": "A short grounded answer is ready.",
+                            },
+                            "finish_reason": "length",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "submit-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "submit_final_answer",
+                                        "arguments": '{"answer":"복구된 최종 답변"}',
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+        )
+
+    final_tool = {
+        "type": "function",
+        "function": {
+            "name": "submit_final_answer",
+            "parameters": {"type": "object"},
+        },
+    }
+    forced_choice = {
+        "type": "function",
+        "function": {"name": "submit_final_answer"},
+    }
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        result = await L2Client(settings, http_client=http_client).complete(
+            messages=[{"role": "user", "content": "질문"}],
+            tools=[final_tool],
+            tool_choice=forced_choice,
+        )
+
+    assert result.tool_calls[0].function.name == "submit_final_answer"
+    assert len(requests) == 2
+    assert requests[1]["tool_choice"] == forced_choice
+    assert "Call submit_final_answer exactly once" in requests[1]["messages"][-1]["content"]
+
+
 async def test_complete_does_not_recover_blank_tool_planner(monkeypatch):
     settings = settings_with_key(monkeypatch)
     attempts = 0

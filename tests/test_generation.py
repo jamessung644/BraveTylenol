@@ -279,6 +279,95 @@ async def test_generation_returns_structured_l2_final_submission():
     assert len(l2.calls) == 2
 
 
+async def test_generation_accepts_extra_fields_in_l2_final_submission():
+    l2 = ScriptedL2(
+        [
+            L2Completion(
+                tool_calls=[
+                    tool_call(
+                        "retrieve-1",
+                        "retrieve_relevant_content",
+                        {"query": "공식 진료지침", "ignored_hint": "extra"},
+                    )
+                ]
+            ),
+            L2Completion(
+                tool_calls=[
+                    tool_call(
+                        "submit-1",
+                        "submit_final_answer",
+                        {
+                            "answer": "여분 필드가 있는 최종 답변 guideline:1",
+                            "ignored_metadata": True,
+                        },
+                    )
+                ]
+            ),
+        ]
+    )
+    retrieval = FakeRetrieval()
+
+    answer = await GenerationEngine(l2, retrieval).answer(
+        [ChatMessage(role="user", content="공식 진료지침 출처를 알려줘")]
+    )
+
+    assert answer == "여분 필드가 있는 최종 답변 guideline:1"
+    assert retrieval.queries == ["공식 진료지침"]
+
+
+async def test_generation_uses_text_alongside_invalid_final_tool_call():
+    l2 = ScriptedL2(
+        [
+            L2Completion(
+                tool_calls=[
+                    tool_call(
+                        "retrieve-1",
+                        "retrieve_relevant_content",
+                        {"query": "공식 진료지침"},
+                    )
+                ]
+            ),
+            L2Completion(
+                content="도구 인자는 잘못됐지만 사용 가능한 답변 guideline:1",
+                tool_calls=[tool_call("submit-bad", "submit_final_answer", {})],
+            ),
+        ]
+    )
+
+    answer = await GenerationEngine(l2, FakeRetrieval()).answer(
+        [ChatMessage(role="user", content="공식 진료지침 출처를 알려줘")]
+    )
+
+    assert answer == "도구 인자는 잘못됐지만 사용 가능한 답변 guideline:1"
+    assert len(l2.calls) == 2
+
+
+async def test_generation_retries_invalid_final_submission_without_tools():
+    l2 = ScriptedL2(
+        [
+            L2Completion(
+                tool_calls=[
+                    tool_call(
+                        "retrieve-1",
+                        "retrieve_relevant_content",
+                        {"query": "공식 진료지침"},
+                    )
+                ]
+            ),
+            L2Completion(tool_calls=[tool_call("submit-bad", "submit_final_answer", {})]),
+            L2Completion(content="일반 completion으로 복구한 답변 guideline:1"),
+        ]
+    )
+
+    answer = await GenerationEngine(l2, FakeRetrieval()).answer(
+        [ChatMessage(role="user", content="공식 진료지침 출처를 알려줘")]
+    )
+
+    assert answer == "일반 completion으로 복구한 답변 guideline:1"
+    assert "tools" not in l2.calls[2]
+    assert "tool_choice" not in l2.calls[2]
+
+
 async def test_generation_handles_only_invalid_initial_tool_calls():
     l2 = ScriptedL2(
         [

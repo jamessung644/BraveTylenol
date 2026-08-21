@@ -71,8 +71,8 @@ Authorization 값이나 전체 응답 본문을 출력하지 않고 실패한다
 | LUNIT_FM_API_URL | https://model.hackathon.lunit.io | L2 base URL |
 | LUNIT_FM_MODEL | Lunit/L2-preview | L2 모델 |
 | AGENT_MODE | rag | rag 또는 passthrough |
-| LUNIT_MCP_URL | 없음 | 주최 측이 공식 제공한 MCP URL |
-| MAX_MCP_CALLS | 4 | 한 검색 실행의 최대 MCP 호출 수 |
+| LUNIT_MCP_URL | https://mcp.hackathon.lunit.io/mcp | 주최 측 공식 MCP URL(빈 값이면 직접 생성) |
+| MAX_MCP_CALLS | 4 | 구성 가능한 상한(평가 지연 방지를 위해 실행당 최대 2회로 추가 제한) |
 | REQUEST_TIMEOUT_SECONDS | 110 | Driver 종료 전 제어된 응답을 위한 전체 요청 제한 |
 | L2_RETRY_ATTEMPTS | 2 | 429/502/503/504 제한 재시도(최대 총 3회 호출) |
 | MAX_COMPLETION_TOKENS | 3072 | 평가 시간을 위한 L2 응답 토큰 상한 |
@@ -81,11 +81,15 @@ Authorization 값이나 전체 응답 본문을 출력하지 않고 실패한다
 | MAX_EVIDENCE_CHARS | 32000 | L2에 전달할 전체 근거 제한 |
 | LOG_LEVEL | INFO | 운영 로그 수준 |
 
-.env.example 형식을 고정하기 위해 선택 설정은 예제 파일에 넣지 않았다. 공식 대회 문서에서
-MCP URL을 확인한 경우에만 개인 .env 또는 배포 환경 변수로 LUNIT_MCP_URL을 추가한다.
-MCP URL이 없거나 MCP가 실패하면 일반화된 의료 안전 프롬프트를 포함한 L2 직접 생성으로
+기존 baseline 환경의 `HARNESS_MODE`, `MAX_TOOL_CALLS`, `UPSTREAM_TIMEOUT_SECONDS`,
+`HARNESS_LOG_LEVEL`도 동일한 설정의 호환 별칭으로 인식한다.
+
+.env.example 형식을 고정하기 위해 선택 설정은 예제 파일에 넣지 않았다. 제출 컨테이너는
+공식 대회 MCP 주소를 기본으로 사용하고, 필요할 때 배포 환경 변수 LUNIT_MCP_URL로 덮어쓴다.
+MCP URL을 빈 값으로 설정했거나 MCP가 실패하면 일반화된 의료 안전 프롬프트를 포함한 L2 직접 생성으로
 자동 전환한다. MCP URL이 처음부터 없으면 검색 판단 호출도 생략하므로 L2를 정확히 한 번만
-호출한다.
+호출한다. 선택적 검색 단계는 전체 요청 제한의 45%, 최대 45초까지만 사용하여 MCP나 검색
+플래너가 느릴 때도 직접 L2 폴백을 실행할 시간을 남긴다.
 
 AGENT_MODE=passthrough는 입력 대화를 L2에 바로 보내는 비교/진단 모드다. 최종 제출 기본값은
 rag다.
@@ -114,11 +118,13 @@ Docker가 설치된 환경에서:
     docker run --rm -p 8000:8000 --env-file .env brave-tylenol:lunit
 
 이미지는 비루트 사용자로 실행되고 .env, 테스트, 문서, 캐시를 포함하지 않는다. API Key를
-Dockerfile의 ARG/ENV로 빌드하지 않는다.
+Dockerfile의 ARG/ENV로 빌드하지 않는다. 베이스 이미지는 Python 3.13.15 slim-trixie로,
+주요 런타임 패키지는 로컬 검증 버전으로 고정해 평가 시 SDK 변경을 방지한다.
 
-현재 개발 PC에는 Docker CLI가 없어 로컬 이미지 빌드는 아직 검증하지 못했다. 제출 전
-Docker가 있는 환경에서 build, /health, /v1/models, 키가 주입된 L2 연결을 반드시
-재확인해야 한다.
+현재 개발 PC에는 Docker CLI가 없어 실제 이미지 빌드는 실행하지 못했다. 대신 고정한 공식
+베이스 태그의 존재, Linux amd64/Python 3.13용 전체 의존성 wheel 해석, `.env`가 없는
+컨테이너 유사 환경의 애플리케이션 import를 확인했다. 제출 파이프라인에서 실제 build와
+`/health`, `/v1/models`, Bearer가 전달된 L2 연결을 마지막으로 재확인해야 한다.
 
 ## 7. 격리 환경 원칙
 

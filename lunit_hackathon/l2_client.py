@@ -88,7 +88,10 @@ class L2Client:
             recovery_payload = self._blank_completion_recovery_payload(
                 response=response,
                 original_payload=payload,
-                enabled=tools is None,
+                enabled=(
+                    tools is None
+                    or _forced_tool_name(tool_choice) == "submit_final_answer"
+                ),
             )
             if recovery_payload is None:
                 raise
@@ -129,16 +132,20 @@ class L2Client:
                     ),
                 }
             )
-        messages.append(
-            {
-                "role": "system",
-                "content": (
-                    "The previous attempt exhausted its token budget before returning text. "
-                    "Provide only the final user-facing answer now, with no analysis or "
-                    "preamble, in at most 150 words."
-                ),
-            }
-        )
+        forced_tool_name = _forced_tool_name(original_payload.get("tool_choice"))
+        if forced_tool_name == "submit_final_answer":
+            recovery_instruction = (
+                "The previous attempt exhausted its token budget before submitting an answer. "
+                "Call submit_final_answer exactly once now with the complete user-facing answer "
+                "in at most 150 words and no analysis or preamble."
+            )
+        else:
+            recovery_instruction = (
+                "The previous attempt exhausted its token budget before returning text. "
+                "Provide only the final user-facing answer now, with no analysis or "
+                "preamble, in at most 150 words."
+            )
+        messages.append({"role": "system", "content": recovery_instruction})
         recovery_payload = dict(original_payload)
         recovery_payload["messages"] = messages
         recovery_payload["max_tokens"] = min(
@@ -282,3 +289,13 @@ def _tool_choice_label(tool_choice: str | Mapping[str, Any] | None) -> str:
     if isinstance(function, Mapping) and isinstance(function.get("name"), str):
         return f"function:{function['name']}"
     return "mapping"
+
+
+def _forced_tool_name(tool_choice: Any) -> str | None:
+    if not isinstance(tool_choice, Mapping):
+        return None
+    function = tool_choice.get("function")
+    if not isinstance(function, Mapping):
+        return None
+    name = function.get("name")
+    return name if isinstance(name, str) else None

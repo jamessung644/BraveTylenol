@@ -127,9 +127,11 @@ class MCPClient:
                     except BaseException as error:
                         caller_error = error
                         raise
-        except Exception as error:
+        except BaseException as error:
             if caller_error is not None:
                 raise caller_error from None
+            if not isinstance(error, Exception):
+                raise
             if isinstance(error, (ConfigurationError, RetrievalError)):
                 raise
             raise RetrievalError(

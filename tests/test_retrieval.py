@@ -1,7 +1,11 @@
+import asyncio
 import json
 from contextlib import asynccontextmanager
 
+import pytest
+
 from lunit_hackathon.config import Settings
+from lunit_hackathon.errors import RetrievalError
 from lunit_hackathon.retrieval import RetrievalEngine
 from lunit_hackathon.schemas import L2Completion, MCPCallResult, MCPTool, ToolCall
 
@@ -157,6 +161,74 @@ async def test_retrieval_enforces_hard_tool_budget(monkeypatch):
     assert result.note == "budget reached"
     assert [tool["function"]["name"] for tool in l2.calls[1]["tools"]] == ["finalize_retrieval"]
     assert l2.calls[1]["tool_choice"]["function"]["name"] == "finalize_retrieval"
+
+
+async def test_retrieval_caps_default_broad_search_to_two_calls(monkeypatch):
+    l2 = ScriptedL2(
+        [
+            L2Completion(
+                tool_calls=[call(str(index), "lookup", {"code": str(index)}) for index in range(3)]
+            ),
+            L2Completion(
+                tool_calls=[
+                    call(
+                        "finish",
+                        "finalize_retrieval",
+                        {
+                            "status": "no_evidence",
+                            "items": [],
+                            "note": "bounded",
+                        },
+                    )
+                ]
+            ),
+        ]
+    )
+    mcp = FakeMCP([lookup_tool()], {"lookup": MCPCallResult(content="{}")})
+
+    await RetrievalEngine(l2, mcp, settings(monkeypatch)).retrieve("unrouted query")
+
+    assert len(mcp.calls) == 2
+    assert [tool["function"]["name"] for tool in l2.calls[1]["tools"]] == [
+        "finalize_retrieval"
+    ]
+
+
+async def test_retrieval_forces_finalization_when_mcp_has_no_tools(monkeypatch):
+    l2 = ScriptedL2(
+        [
+            L2Completion(
+                tool_calls=[
+                    call(
+                        "finish",
+                        "finalize_retrieval",
+                        {"status": "no_evidence", "items": [], "note": "empty server"},
+                    )
+                ]
+            )
+        ]
+    )
+
+    result = await RetrievalEngine(l2, FakeMCP([], {}), settings(monkeypatch)).retrieve("query")
+
+    assert result.status == "no_evidence"
+    assert l2.calls[0]["tool_choice"]["function"]["name"] == "finalize_retrieval"
+    assert len(l2.calls) == 1
+
+
+async def test_retrieval_timeout_becomes_recoverable_error(monkeypatch):
+    class SlowMCP(FakeMCP):
+        async def list_tools(self):
+            await asyncio.sleep(1)
+            return []
+
+    short_settings = settings(monkeypatch).model_copy(update={"request_timeout_seconds": 0.01})
+    engine = RetrievalEngine(ScriptedL2([]), SlowMCP([], {}), short_settings)
+
+    with pytest.raises(RetrievalError) as caught:
+        await engine.retrieve("query")
+
+    assert caught.value.code == "retrieval_timeout"
 
 
 async def test_retrieval_rejects_duplicate_calls_and_uses_previous_result(monkeypatch):

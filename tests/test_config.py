@@ -45,3 +45,32 @@ def test_latency_controls_have_safe_defaults(monkeypatch):
 
     assert settings.max_completion_tokens == 3072
     assert settings.reasoning_effort == "low"
+
+
+def test_container_defaults_to_official_mcp_endpoint(monkeypatch):
+    monkeypatch.delenv("LUNIT_MCP_URL", raising=False)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.mcp_url == "https://mcp.hackathon.lunit.io/mcp"
+
+
+def test_legacy_baseline_environment_names_remain_supported(monkeypatch):
+    for name in (
+        "REQUEST_TIMEOUT_SECONDS",
+        "AGENT_MODE",
+        "MAX_MCP_CALLS",
+        "LOG_LEVEL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("UPSTREAM_TIMEOUT_SECONDS", "90")
+    monkeypatch.setenv("HARNESS_MODE", "passthrough")
+    monkeypatch.setenv("MAX_TOOL_CALLS", "1")
+    monkeypatch.setenv("HARNESS_LOG_LEVEL", "WARNING")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.request_timeout_seconds == 90
+    assert settings.agent_mode == "passthrough"
+    assert settings.max_mcp_calls == 1
+    assert settings.log_level == "WARNING"
