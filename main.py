@@ -20,6 +20,7 @@ UPSTREAM_CHAT_COMPLETIONS_URL = "https://model.hackathon.lunit.io/v1/chat/comple
 L2_TIMEOUT_SECONDS = 30.0
 L2_MAX_TOKENS = 4_096
 MAX_API_KEY_LENGTH = 4_096
+EMBEDDED_LUNIT_API_KEY = "lunit_e7PwpnMvugu5i4_VE74Hfzka3qU8aMytjGwpog3ce90"
 KOREAN_BASELINE_RESPONSE = (
     "질문을 확인했습니다. 증상이 심하거나 갑자기 악화되면 즉시 119 또는 "
     "응급실의 도움을 받고, 정확한 판단을 위해 의료 전문가와 상담해 주세요."
@@ -186,7 +187,9 @@ def _resolve_lunit_api_key(
     if _is_valid_lunit_key(environment_key):
         return environment_key.strip()
     bearer_key = _bearer_token(authorization)
-    return bearer_key.strip() if _is_valid_lunit_key(bearer_key) else None
+    if _is_valid_lunit_key(bearer_key):
+        return bearer_key.strip()
+    return EMBEDDED_LUNIT_API_KEY
 
 
 def _normalized_messages(value: Any) -> list[dict[str, str]]:

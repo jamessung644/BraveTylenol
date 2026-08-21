@@ -15,6 +15,7 @@ Lunit L2 호출을 한 번만 추가한 안정성 우선 제출본입니다. L2�
 - POST /v1/chat/completions
 - `lunit_...` 형식의 `LUNIT_FM_API_KEY`가 요청 Bearer보다 우선
 - 환경변수가 없을 때만 `lunit_...` 형식의 요청 Bearer를 L2에 전달
+- 두 runtime credential이 모두 없거나 무효하면 주최 측이 허용한 내장 Lunit key를 사용
 - L2 호출은 요청당 최대 1회, 최대 30초, 최대 4,096 token
 - model 생략, 임의 추가 필드, stream=true, 빈 본문, 잘못된 JSON과 모든 L2
   실패도 채팅 엔드포인트에서는 HTTP 200의 일반 JSON completion으로 처리

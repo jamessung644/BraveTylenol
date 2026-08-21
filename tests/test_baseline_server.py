@@ -143,8 +143,8 @@ class BoundedL2FallbackTest(unittest.TestCase):
             "Bearer lunit_request_test",
         )
 
-    def test_non_lunit_bearer_without_environment_falls_back_without_network(self):
-        opener = RecordingOpener(AssertionError("network must not be called"))
+    def test_non_lunit_bearer_without_environment_uses_embedded_key(self):
+        opener = RecordingOpener(FakeResponse({"choices": [{"message": {"content": "L2 답변"}}]}))
 
         result = main.request_l2_or_fallback(
             {"messages": [{"role": "user", "content": "질문"}]},
@@ -153,13 +153,13 @@ class BoundedL2FallbackTest(unittest.TestCase):
             environ={},
         )
 
+        self.assertEqual(result["choices"][0]["message"]["content"], "L2 답변")
         self.assertEqual(
-            result["choices"][0]["message"]["content"],
-            main.KOREAN_BASELINE_RESPONSE,
+            opener.requests[0].get_header("Authorization"),
+            f"Bearer {main.EMBEDDED_LUNIT_API_KEY}",
         )
-        self.assertEqual(opener.requests, [])
 
-    def test_malformed_environment_keys_fall_back_without_network(self):
+    def test_malformed_environment_keys_are_ignored_in_favor_of_embedded_key(self):
         malformed_keys = [
             "lunit_test\nsecond-line",
             "lunit_" + ("x" * 4_096),
@@ -167,7 +167,9 @@ class BoundedL2FallbackTest(unittest.TestCase):
 
         for malformed_key in malformed_keys:
             with self.subTest(key_length=len(malformed_key)):
-                opener = RecordingOpener(AssertionError("network must not be called"))
+                opener = RecordingOpener(
+                    FakeResponse({"choices": [{"message": {"content": "L2 답변"}}]})
+                )
                 result = main.request_l2_or_fallback(
                     {"messages": [{"role": "user", "content": "질문"}]},
                     None,
@@ -175,11 +177,11 @@ class BoundedL2FallbackTest(unittest.TestCase):
                     environ={"LUNIT_FM_API_KEY": malformed_key},
                 )
 
+                self.assertEqual(result["choices"][0]["message"]["content"], "L2 답변")
                 self.assertEqual(
-                    result["choices"][0]["message"]["content"],
-                    main.KOREAN_BASELINE_RESPONSE,
+                    opener.requests[0].get_header("Authorization"),
+                    f"Bearer {main.EMBEDDED_LUNIT_API_KEY}",
                 )
-                self.assertEqual(opener.requests, [])
 
     def test_server_supports_injected_completion_provider(self):
         self.assertIn("completion_provider", inspect.signature(create_server).parameters)
@@ -238,7 +240,11 @@ class BoundedL2FallbackTest(unittest.TestCase):
 class BaselineServerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.server = create_server("127.0.0.1", 0)
+        cls.server = create_server(
+            "127.0.0.1",
+            0,
+            completion_provider=lambda request_payload, authorization: main.completion_payload(),
+        )
         cls.port = cls.server.server_address[1]
         cls.thread = threading.Thread(
             target=cls.server.serve_forever,
