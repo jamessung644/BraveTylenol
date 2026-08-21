@@ -9,29 +9,32 @@ from typing import Any
 from lunit_hackathon.schemas import EvidenceItem
 
 _METADATA_KEYS = ("title", "url", "jurisdiction", "effective_date")
+_AUTHORITY_RANKS = {
+    "openapi_mfds_check_drug_permission": 5,
+    "openapi_mfds_find_drugs_by_ingredient": 5,
+    "openapi_mfds_get_drug_indication": 5,
+    "hira_updates_search": 5,
+    "openapi_hira_get_drug_price": 5,
+    "openapi_hira_disease_check_code": 5,
+    "kcd_search_codes": 5,
+    "kcd_get_name": 5,
+    "openapi_law_search": 5,
+    "openapi_law_list_articles": 5,
+    "openapi_law_get_article": 5,
+    "index_list_documents": 4,
+    "index_get_relevant_nodes": 4,
+    "index_get_page_content": 4,
+    "index_keyword_search": 4,
+    "dailymed_get_label": 4,
+    "rag_vector_query": 3,
+    "hira_faq_search": 2,
+    "rag_sql_query": 1,
+}
 
 
 def authority_rank(source_tool: str) -> int:
     """Return the authority tier for an established MCP source tool."""
-    tool = source_tool.casefold().strip()
-
-    # These specific sources must be classified before broader source families.
-    if "hira" in tool and "faq" in tool:
-        return 2
-    if "faers" in tool or tool == "rag_sql_query":
-        return 1
-    if (
-        "mfds" in tool
-        or "hira" in tool
-        or "kcd" in tool
-        or tool.startswith("openapi_law_")
-    ):
-        return 5
-    if tool.startswith("index_") or "dailymed" in tool:
-        return 4
-    if tool == "rag_vector_query" or "pubmed" in tool:
-        return 3
-    return 0
+    return _AUTHORITY_RANKS.get(source_tool.casefold().strip(), 0)
 
 
 def extract_evidence_metadata(content: str) -> dict[str, str | None]:
@@ -71,12 +74,20 @@ def extract_evidence_metadata(content: str) -> dict[str, str | None]:
     visit(parsed)
     return {
         "title": values["title"],
-        "url": values["url"] or values["source_link"],
+        "url": (
+            values["url"]
+            if values["url"] is not None
+            else values["source_link"]
+        ),
         "jurisdiction": values["jurisdiction"],
         "effective_date": (
             values["effective_date"]
-            or values["publication_date"]
-            or values["date"]
+            if values["effective_date"] is not None
+            else (
+                values["publication_date"]
+                if values["publication_date"] is not None
+                else values["date"]
+            )
         ),
     }
 
@@ -126,9 +137,13 @@ def valid_cite_uids(items: Sequence[EvidenceItem]) -> frozenset[str]:
 
 
 def _normalize_content(content: str) -> str:
-    without_punctuation = "".join(
-        character
-        for character in content
-        if not unicodedata.category(character).startswith("P")
-    )
-    return " ".join(without_punctuation.split()).casefold()
+    normalized: list[str] = []
+    for index, character in enumerate(content):
+        if not unicodedata.category(character).startswith("P"):
+            normalized.append(character)
+            continue
+
+        previous_is_digit = index > 0 and content[index - 1].isdecimal()
+        next_is_digit = index + 1 < len(content) and content[index + 1].isdecimal()
+        normalized.append(character if previous_is_digit and next_is_digit else " ")
+    return " ".join("".join(normalized).split()).casefold()

@@ -95,6 +95,21 @@ def test_metadata_extraction_recurses_deterministically_and_prefers_primary_fiel
     }
 
 
+def test_metadata_extraction_preserves_empty_primary_strings_over_fallbacks():
+    metadata = extract_evidence_metadata(
+        '{"url":"","source_link":"https://fallback.example",'
+        '"effective_date":"","publication_date":"2025-01-01",'
+        '"date":"2024-01-01"}'
+    )
+
+    assert metadata == {
+        "title": None,
+        "url": "",
+        "jurisdiction": None,
+        "effective_date": "",
+    }
+
+
 @pytest.mark.parametrize("content", ["not json", "{broken", "[]"])
 def test_metadata_extraction_returns_empty_shape_for_missing_or_malformed_json(content: str):
     assert extract_evidence_metadata(content) == {
@@ -108,15 +123,26 @@ def test_metadata_extraction_returns_empty_shape_for_missing_or_malformed_json(c
 @pytest.mark.parametrize(
     ("source_tool", "expected_rank"),
     [
+        ("openapi_mfds_check_drug_permission", 5),
+        ("openapi_mfds_find_drugs_by_ingredient", 5),
         ("openapi_mfds_get_drug_indication", 5),
+        ("openapi_hira_get_drug_price", 5),
+        ("openapi_hira_disease_check_code", 5),
+        ("kcd_search_codes", 5),
         ("hira_updates_search", 5),
         ("openapi_law_get_article", 5),
+        ("openapi_law_search", 5),
+        ("openapi_law_list_articles", 5),
         ("kcd_get_name", 5),
+        ("index_list_documents", 4),
+        ("index_get_relevant_nodes", 4),
         ("index_get_page_content", 4),
+        ("index_keyword_search", 4),
         ("dailymed_get_label", 4),
         ("rag_vector_query", 3),
         ("hira_faq_search", 2),
         ("rag_sql_query", 1),
+        ("adr_retrieve_drug_info", 0),
         ("unrecognized_tool", 0),
     ],
 )
@@ -126,7 +152,21 @@ def test_authority_rank_covers_every_tier(source_tool: str, expected_rank: int):
 
 def test_specific_authority_tiers_beat_generic_transport_matches():
     assert authority_rank("hira_faq_search") == 2
-    assert authority_rank("faers_rag_vector_query") == 1
+    assert authority_rank("rag_sql_query") == 1
+
+
+@pytest.mark.parametrize(
+    "source_tool",
+    [
+        "unknown_hira_adapter",
+        "unrelated_pubmed_proxy",
+        "not_faers_but_named_faers",
+        "index_unrelated_proxy",
+        "dailymed_proxy",
+    ],
+)
+def test_unknown_lookalike_tools_receive_no_authority(source_tool: str):
+    assert authority_rank(source_tool) == 0
 
 
 def test_stable_ties_preserve_original_order():
@@ -146,6 +186,25 @@ def test_similar_but_not_exact_claims_are_not_deduplicated():
     assert [item.cite_uid for item in rank_deduplicate_and_bound([first, second])] == [
         "first",
         "second",
+    ]
+
+
+def test_decimal_punctuation_keeps_medically_distinct_doses_separate():
+    first = evidence("one", "index_get_page_content", 0.7, "Dose is 1.0 mg.")
+    second = evidence("ten", "index_get_page_content", 0.7, "Dose is 10 mg.")
+
+    assert [item.cite_uid for item in rank_deduplicate_and_bound([first, second])] == [
+        "one",
+        "ten",
+    ]
+
+
+def test_punctuation_and_whitespace_equivalent_duplicates_collapse():
+    first = evidence("first", "index_get_page_content", 0.7, "Take dose: 10 mg.")
+    second = evidence("second", "index_get_page_content", 0.6, "take   dose 10 mg")
+
+    assert [item.cite_uid for item in rank_deduplicate_and_bound([first, second])] == [
+        "first"
     ]
 
 
