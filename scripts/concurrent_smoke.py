@@ -115,12 +115,12 @@ def _read_json_worker(
         result = 0, None
     try:
         connection.send(result)
-    except (BrokenPipeError, EOFError, OSError):
+    except Exception:
         pass
     finally:
         try:
             connection.close()
-        except (BrokenPipeError, EOFError, OSError):
+        except Exception:
             pass
 
 
@@ -164,12 +164,12 @@ def _read_json(
         if sender is not None:
             try:
                 sender.close()
-            except OSError:
+            except Exception:
                 cleanup_failed = True
         if receiver is not None:
             try:
                 receiver.close()
-            except OSError:
+            except Exception:
                 cleanup_failed = True
         if process is not None and process_started:
             alive: bool | None = None
@@ -199,6 +199,13 @@ def _read_json(
             try:
                 process.join(_PROCESS_JOIN_SECONDS)
             except (AssertionError, OSError):
+                cleanup_failed = True
+            final_alive: bool | None = None
+            try:
+                final_alive = process.is_alive()
+            except (AssertionError, OSError):
+                cleanup_failed = True
+            if final_alive is not False:
                 cleanup_failed = True
     return (0, None) if cleanup_failed else result
 
@@ -294,8 +301,7 @@ def run_completions(
         except Exception:
             shutdown_failed = True
     if shutdown_failed:
-        results.extend(_failed_result(started) for _ in range(requests - len(results)))
-        return results
+        return [_failed_result(started) for _ in range(requests)]
     results.extend(_failed_result(started) for _ in range(requests - len(results)))
     return results
 

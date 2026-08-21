@@ -339,6 +339,114 @@ def test_worker_pipe_close_failure_is_suppressed_without_false_success():
             raise OSError("send unavailable")
 
         def close(self):
-            raise OSError("close unavailable")
+            raise RuntimeError("close unavailable")
 
     smoke._read_json_worker(Connection(), "", "/", None, "GET", 0.1)
+
+
+def test_shutdown_failure_overrides_successful_futures(monkeypatch):
+    """A failed executor shutdown must fail closed even when every future returned 200."""
+    smoke = _load_smoke_module()
+
+    class Future:
+        def result(self, timeout):
+            return smoke.RequestResult(
+                status=200,
+                latency_seconds=0.0,
+                success=True,
+                fallback=False,
+            )
+
+    class Executor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def submit(self, *args, **kwargs):
+            return Future()
+
+        def shutdown(self, **kwargs):
+            raise RuntimeError("shutdown unavailable")
+
+    monkeypatch.setattr(smoke, "ThreadPoolExecutor", Executor)
+
+    results = smoke.run_completions("http://127.0.0.1:1", 2, 2, 0.1)
+    assert [result.status for result in results] == [0, 0]
+    assert not any(result.success for result in results)
+
+
+def test_process_still_alive_after_kill_fails_closed(monkeypatch):
+    """An unverified dead child must never permit a 200 result."""
+    smoke = _load_smoke_module()
+
+    class Connection:
+        def close(self):
+            return None
+
+        def poll(self, timeout):
+            return True
+
+        def recv(self):
+            return 200, {"ok": True}
+
+    class Process:
+        def start(self):
+            return None
+
+        def is_alive(self):
+            return True
+
+        def terminate(self):
+            return None
+
+        def join(self, timeout):
+            return None
+
+        def kill(self):
+            return None
+
+    class Context:
+        def Pipe(self, duplex):
+            return Connection(), Connection()
+
+        def Process(self, **kwargs):
+            return Process()
+
+    monkeypatch.setattr(smoke.multiprocessing, "get_context", lambda _: Context())
+
+    assert smoke._read_json("http://example.test", "/", None, "GET", 0.1) == (0, None)
+
+
+def test_unexpected_parent_pipe_close_failure_fails_closed(monkeypatch):
+    """Unexpected ordinary close exceptions must be sanitized in the parent supervisor."""
+    smoke = _load_smoke_module()
+
+    class Connection:
+        def close(self):
+            raise RuntimeError("close unavailable")
+
+        def poll(self, timeout):
+            return True
+
+        def recv(self):
+            return 200, {"ok": True}
+
+    class Process:
+        def start(self):
+            return None
+
+        def is_alive(self):
+            return False
+
+        def join(self, timeout):
+            return None
+
+    class Context:
+        def Pipe(self, duplex):
+            return Connection(), Connection()
+
+        def Process(self, **kwargs):
+            return Process()
+
+    monkeypatch.setattr(smoke.multiprocessing, "get_context", lambda _: Context())
+
+    assert smoke._read_json("http://example.test", "/", None, "GET", 0.1) == (0, None)
