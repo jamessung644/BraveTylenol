@@ -9,6 +9,23 @@ from harness.errors import UpstreamResponseError, UpstreamTimeoutError
 from harness.schemas import L2Completion, TokenUsage
 
 
+async def test_imported_app_is_ready_without_key_or_upstream_calls(monkeypatch):
+    def upstream_must_not_be_constructed(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("readiness must not construct an L2 or MCP client")
+
+    monkeypatch.delenv("LUNIT_FM_API_KEY", raising=False)
+    monkeypatch.setattr(app_module, "L2Client", upstream_must_not_be_constructed)
+    monkeypatch.setattr(app_module, "MCPClient", upstream_must_not_be_constructed)
+
+    assert app_module.app is not None
+    async with AsyncClient(transport=ASGITransport(app=app_module.app), base_url="http://test") as client:
+        response = await client.get("/v1/models")
+
+    assert response.status_code == 200
+    assert response.json()["data"][0]["id"] == "team-chatbot"
+
+
 async def test_models_available_without_api_key(settings_without_key):
     app = create_app(settings=settings_without_key)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
