@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -57,3 +57,28 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: list[ChatCompletionChoice]
     usage: TokenUsage = Field(default_factory=TokenUsage)
+
+
+class MCPTool(BaseModel):
+    """A transport-independent description of an MCP tool."""
+
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+
+    def as_openai_tool(self) -> dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.input_schema,
+            },
+        }
+
+
+class MCPCallResult(BaseModel):
+    """A stable, bounded representation of an MCP tool invocation result."""
+
+    content: str
+    is_error: bool = False
