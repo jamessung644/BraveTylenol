@@ -82,3 +82,16 @@ class MCPCallResult(BaseModel):
 
     content: str
     is_error: bool = False
+
+
+class EvidenceItem(BaseModel):
+    cite_uid: str
+    relevance_score: float = Field(ge=0.0, le=1.0)
+    source_tool: str
+    content: str
+
+
+class RetrievalResult(BaseModel):
+    status: Literal["sufficient", "partial", "no_evidence"]
+    items: list[EvidenceItem] = Field(default_factory=list)
+    note: str = ""
