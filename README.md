@@ -19,6 +19,8 @@ bake it into an image, or pass it as a Docker build argument.
 | `HARNESS_MODE` | No | `passthrough` | `passthrough` calls L2 directly; `rag` enables MCP retrieval. |
 | `MAX_TOOL_CALLS` | No | `4` | Maximum MCP tool-call rounds in RAG mode. |
 | `UPSTREAM_TIMEOUT_SECONDS` | No | `150` | Deadline for the complete chat request (including RAG), in seconds. |
+| `MAX_COMPLETION_TOKENS` | No | `3072` | L2 output ceiling that prevents long-tail completions from exceeding the evaluation wall-clock budget. |
+| `LUNIT_REASONING_EFFORT` | No | `low` | L2 reasoning effort used to reduce long-tail latency while preserving a complete answer. |
 | `MAX_TOOL_RESULT_CHARS` | No | `12000` | Per-tool-result truncation limit. |
 | `MAX_EVIDENCE_CHARS` | No | `32000` | Total retrieved-evidence truncation limit. |
 

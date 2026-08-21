@@ -214,7 +214,9 @@ async def test_default_passthrough_does_not_construct_mcp_and_copies_final_usage
         async def complete(self, *, messages, tools=None, tool_choice=None):
             assert tools is None
             assert tool_choice is None
-            assert messages[0].content == "원문 질문"
+            assert messages[0].role == "system"
+            assert "no more than 300 words" in messages[0].content
+            assert messages[1].content == "원문 질문"
             self.last_usage = TokenUsage(prompt_tokens=7, completion_tokens=3, total_tokens=10)
             return L2Completion(content="L2 원문 응답", usage=self.last_usage)
 

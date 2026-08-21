@@ -33,7 +33,7 @@ class RecordingGeneration:
         return self._answer
 
 
-async def test_passthrough_sends_original_conversation_without_tools():
+async def test_passthrough_adds_response_budget_instruction_and_preserves_conversation():
     messages = [ChatMessage(role="user", content="질문")]
     l2 = RecordingL2([L2Completion(content="직접 답변")])
     generation = RecordingGeneration(AssertionError("generation must not be called"))
@@ -41,7 +41,10 @@ async def test_passthrough_sends_original_conversation_without_tools():
     answer = await ChatOrchestrator(l2=l2, generation=generation, mode="passthrough").answer(messages)
 
     assert answer == "직접 답변"
-    assert l2.calls == [{"messages": messages}]
+    sent_messages = l2.calls[0]["messages"]
+    assert sent_messages[0].role == "system"
+    assert "no more than 300 words" in sent_messages[0].content
+    assert sent_messages[1:] == messages
     assert generation.calls == []
 
 
