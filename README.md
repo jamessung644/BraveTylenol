@@ -1,7 +1,7 @@
 # BraveTylenol bounded-L2 Korean baseline
 
 이 브랜치는 Trial 16에서 완주한 `9ead580` no-timeout Korean baseline을 바탕으로
-Lunit L2 호출을 한 번만 추가한 안정성 우선 제출본입니다. L2가 18초 안에 정상
+Lunit L2 호출을 한 번만 추가한 안정성 우선 제출본입니다. L2가 30초 안에 정상
 텍스트를 반환하면 그 답변을 사용하고, 인증·네트워크·HTTP·JSON·빈 응답·시간초과
 문제가 생기면 HTTP 오류를 평가기에 전파하지 않고 검증된 한국어 기준 응답으로
 복귀합니다. MCP와 재시도는 사용하지 않습니다.
@@ -13,8 +13,9 @@ Lunit L2 호출을 한 번만 추가한 안정성 우선 제출본입니다. L2�
 - GET /health, GET /healthz
 - GET /v1/models
 - POST /v1/chat/completions
-- 정상 CoEval 요청은 대화 전체와 요청 Bearer token을 L2로 전달
-- L2 호출은 요청당 최대 1회, 최대 18초, 최대 4,096 token
+- `lunit_...` 형식의 `LUNIT_FM_API_KEY`가 요청 Bearer보다 우선
+- 환경변수가 없을 때만 `lunit_...` 형식의 요청 Bearer를 L2에 전달
+- L2 호출은 요청당 최대 1회, 최대 30초, 최대 4,096 token
 - model 생략, 임의 추가 필드, stream=true, 빈 본문, 잘못된 JSON과 모든 L2
   실패도 채팅 엔드포인트에서는 HTTP 200의 일반 JSON completion으로 처리
 - API 키와 Authorization 헤더가 없어도 실행
@@ -51,7 +52,7 @@ docker run --rm --network=none -p 8000:8000 brave-tylenol-baseline
 ## 중요한 제한
 
 대회 문서의 공식 규칙에 따라 정상 경로의 최종 답변은 `Lunit/L2-preview`가
-생성합니다. 단, 단일 L2 호출이 실패하거나 18초를 넘으면 전체 CoEval 실행을
+생성합니다. 단, 단일 L2 호출이 실패하거나 30초를 넘으면 전체 CoEval 실행을
 실패시키지 않기 위해 정적 안전 응답을 반환합니다. 검증 세트 약 301개와 동시성
 16을 기준으로 모든 L2 요청이 제한시간까지 지연되어도 생성 대기 상한은 대략
-`ceil(301 / 16) × 18 = 342초`입니다.
+`ceil(301 / 16) × 30 = 570초`입니다.
