@@ -1,3 +1,5 @@
+import pytest
+
 from lunit_hackathon.fast_policy import choose_generation_profile
 from lunit_hackathon.schemas import ChatMessage
 
@@ -24,6 +26,7 @@ def test_short_routine_question_uses_smallest_profile():
 
     assert profile.kind == "routine"
     assert profile.max_tokens == 1024
+    assert "If an emergency is plausible" in profile.system_prompt
 
 
 def test_long_clinical_context_keeps_room_for_a_complete_answer():
@@ -42,3 +45,22 @@ def test_korean_emergency_language_is_detected():
 
     assert profile.kind == "emergency"
 
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Sudden chest pressure is spreading into my left arm.",
+        "One side of their face is drooping and their speech is slurred.",
+        "I am having trouble breathing.",
+        "I took a whole bottle of pills.",
+        "가슴이 짓눌리듯 아프고 왼팔로 퍼져요.",
+        "얼굴 한쪽이 처지고 말이 어눌해졌어요.",
+        "숨쉬기가 너무 힘들어요.",
+        "약 한 병을 전부 먹었어요.",
+    ],
+)
+def test_common_emergency_paraphrases_get_the_larger_budget(text):
+    profile = choose_generation_profile([ChatMessage(role="user", content=text)])
+
+    assert profile.kind == "emergency"
+    assert profile.max_tokens == 1536

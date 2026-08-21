@@ -100,6 +100,47 @@ async def test_chat_forwards_evaluator_bearer_key_to_l2(monkeypatch):
     assert RecordingL2.received_api_key == "evaluator-secret"
 
 
+async def test_fast_mode_ignores_mcp_and_forwards_the_full_conversation_once(monkeypatch):
+    monkeypatch.setenv("LUNIT_FM_API_KEY", "test-key")
+    monkeypatch.setenv("AGENT_MODE", "fast")
+    monkeypatch.setenv("LUNIT_MCP_URL", "https://mcp.example.test")
+
+    class RecordingL2:
+        calls = []
+
+        def __init__(self, settings, *, http_client=None):
+            del settings, http_client
+            self.last_usage = TokenUsage()
+
+        async def complete(self, **kwargs):
+            type(self).calls.append(kwargs)
+            return L2Completion(content="멀티턴 L2 답변")
+
+    def forbidden_mcp(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("fast mode must not construct an MCP client")
+
+    monkeypatch.setattr("app.L2Client", RecordingL2)
+    monkeypatch.setattr("app.MCPClient", forbidden_mcp)
+    app = create_app(Settings(_env_file=None))
+    conversation = [
+        {"role": "user", "content": "첫 질문"},
+        {"role": "assistant", "content": "이전 답변"},
+        {"role": "user", "content": "후속 질문"},
+    ]
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "team-chatbot", "messages": conversation},
+        )
+
+    assert response.status_code == 200
+    assert len(RecordingL2.calls) == 1
+    assert RecordingL2.calls[0]["messages"][1:] == conversation
+    assert RecordingL2.calls[0]["max_tokens"] == 1024
+
+
 async def test_chat_rejects_non_bearer_authorization(monkeypatch):
     monkeypatch.delenv("LUNIT_FM_API_KEY", raising=False)
     app = create_app(Settings(_env_file=None), FakeOrchestrator())
