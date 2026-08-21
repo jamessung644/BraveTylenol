@@ -24,3 +24,7 @@ class MalformedUpstreamResponseError(UpstreamResponseError):
 
 class RetrievalError(LunitHackathonError):
     """Evidence retrieval failed without invalidating direct L2 generation."""
+
+    def __init__(self, message: str, *, code: str = "retrieval_failed") -> None:
+        super().__init__(message)
+        self.code = code

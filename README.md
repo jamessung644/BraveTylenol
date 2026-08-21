@@ -74,7 +74,7 @@ Authorization 값이나 전체 응답 본문을 출력하지 않고 실패한다
 | LUNIT_MCP_URL | 없음 | 주최 측이 공식 제공한 MCP URL |
 | MAX_MCP_CALLS | 4 | 한 검색 실행의 최대 MCP 호출 수 |
 | REQUEST_TIMEOUT_SECONDS | 110 | Driver 종료 전 제어된 응답을 위한 전체 요청 제한 |
-| L2_RETRY_ATTEMPTS | 1 | 429/502/503/504 제한 재시도 |
+| L2_RETRY_ATTEMPTS | 2 | 429/502/503/504 제한 재시도(최대 총 3회 호출) |
 | MAX_COMPLETION_TOKENS | 3072 | 평가 시간을 위한 L2 응답 토큰 상한 |
 | LUNIT_REASONING_EFFORT | low | 긴 추론 지연을 줄이는 L2 reasoning effort |
 | MAX_TOOL_RESULT_CHARS | 12000 | 개별 도구 결과 크기 제한 |

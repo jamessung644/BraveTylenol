@@ -114,6 +114,58 @@ async def test_complete_retries_transient_status_once(monkeypatch):
     assert result.content == "성공"
 
 
+async def test_complete_retries_two_consecutive_bad_gateways(monkeypatch):
+    settings = settings_with_key(monkeypatch)
+    attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return httpx.Response(502, json={"error": {"type": "bad_gateway"}})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "성공"}}]})
+
+    async def no_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr("lunit_hackathon.l2_client.asyncio.sleep", no_sleep)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        result = await L2Client(settings, http_client=http_client).complete(
+            messages=[{"role": "user", "content": "테스트"}]
+        )
+
+    assert attempts == 3
+    assert result.content == "성공"
+
+
+async def test_complete_accumulates_usage_across_generation_steps(monkeypatch):
+    settings = settings_with_key(monkeypatch)
+    responses = iter(
+        [
+            {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
+            {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10},
+        ]
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "성공"}}],
+                "usage": next(responses),
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = L2Client(settings, http_client=http_client)
+        await client.complete(messages=[{"role": "user", "content": "첫 단계"}])
+        await client.complete(messages=[{"role": "user", "content": "둘째 단계"}])
+
+    assert client.last_usage.prompt_tokens == 11
+    assert client.last_usage.completion_tokens == 5
+    assert client.last_usage.total_tokens == 16
+
+
 async def test_complete_rejects_malformed_success(monkeypatch):
     settings = settings_with_key(monkeypatch)
 

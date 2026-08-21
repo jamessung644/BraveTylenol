@@ -1,5 +1,4 @@
 import logging
-import uuid
 from collections.abc import Sequence
 from typing import Any, Literal
 
@@ -42,9 +41,8 @@ class ChatOrchestrator:
             answer = await self._generation.answer(messages)
         except RetrievalError as error:
             logger.warning(
-                "retrieval_fallback request_id=%s error_type=%s",
-                uuid.uuid4(),
-                type(error).__name__,
+                "retrieval_fallback error_code=%s",
+                error.code,
             )
             answer = await self._generation.direct_answer(messages)
 
