@@ -223,6 +223,25 @@ async def test_complete_accumulates_usage_across_generation_steps(monkeypatch):
     assert client.last_usage.total_tokens == 16
 
 
+async def test_complete_uses_a_fresh_logical_deadline_for_each_call(monkeypatch):
+    settings = settings_with_key(monkeypatch).model_copy(update={"request_timeout_seconds": 10})
+    observed_timeouts = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        observed_timeouts.append(request.extensions["timeout"]["read"])
+        return httpx.Response(200, json={"choices": [{"message": {"content": "성공"}}]})
+
+    clock = iter([0.0, 0.0, 0.0, 0.0, 20.0, 20.0, 20.0, 20.0])
+    monkeypatch.setattr("lunit_hackathon.l2_client.perf_counter", lambda: next(clock))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = L2Client(settings, http_client=http_client)
+        await client.complete(messages=[{"role": "user", "content": "첫 호출"}])
+        await client.complete(messages=[{"role": "user", "content": "둘째 호출"}])
+
+    assert observed_timeouts == [10, 10]
+
+
 async def test_complete_rejects_malformed_success(monkeypatch):
     settings = settings_with_key(monkeypatch)
 

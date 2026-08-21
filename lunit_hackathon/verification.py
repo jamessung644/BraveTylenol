@@ -13,6 +13,7 @@ from lunit_hackathon.errors import (
     UpstreamTimeoutError,
     UpstreamTransportError,
 )
+from lunit_hackathon.evidence import bounded_evidence_payload
 from lunit_hackathon.prompts import MEDICAL_VERIFICATION_SYSTEM_PROMPT
 from lunit_hackathon.schemas import ChatMessage, RetrievalResult
 
@@ -37,13 +38,17 @@ class AnswerVerifier:
         timeout = min(25.0, deadline.remaining() - 2.0)
         if timeout <= 0:
             return candidate
+        _, evidence_payload = bounded_evidence_payload(
+            retrieval,
+            self._settings.max_evidence_chars,
+        )
         conversation = [
             ChatMessage(role="system", content=MEDICAL_VERIFICATION_SYSTEM_PROMPT).model_dump(
                 exclude_none=True
             ),
             *(message.model_dump(exclude_none=True) for message in messages),
             _quoted_block("CANDIDATE", candidate),
-            _quoted_block("SELECTED EVIDENCE", retrieval.model_dump(mode="json")),
+            {"role": "system", "content": evidence_payload},
         ]
         try:
             completion = await self._l2.complete(

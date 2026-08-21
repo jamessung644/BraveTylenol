@@ -26,6 +26,25 @@ def settings() -> Settings:
     return Settings(_env_file=None)
 
 
+def maximum_evidence_result() -> RetrievalResult:
+    from lunit_hackathon.schemas import EvidenceItem
+
+    return RetrievalResult(
+        status="partial",
+        note="n" * 24_000,
+        items=[
+            EvidenceItem(
+                cite_uid="largest:item",
+                source_tool="openapi_mfds_get_drug_indication",
+                relevance_score=0.9,
+                content="e" * 24_000,
+                title="t" * 1_000,
+                url="https://example.test/" + "u" * 1_000,
+            )
+        ],
+    )
+
+
 async def test_verifier_returns_repaired_answer_for_high_risk_drug_claim():
     l2 = ScriptedL2(L2Completion(content="수정된 근거 기반 답변"))
     candidate = "근거 없는 2배 복용 권고"
@@ -42,6 +61,22 @@ async def test_verifier_returns_repaired_answer_for_high_risk_drug_claim():
     assert l2.calls[0]["reasoning_effort"] == "medium"
     assert l2.calls[0]["timeout_seconds"] <= 25
     assert "BEGIN UNTRUSTED CANDIDATE" in l2.calls[0]["messages"][-2]["content"]
+
+
+async def test_verifier_evidence_payload_is_bounded_including_delimiters():
+    l2 = ScriptedL2(L2Completion(content="수정된 답변"))
+    configured = settings().model_copy(update={"max_evidence_chars": 24_000})
+
+    await AnswerVerifier(l2, configured).verify(
+        [ChatMessage(role="user", content="질문")],
+        "후보 답변",
+        maximum_evidence_result(),
+        RequestDeadline.start(),
+    )
+
+    evidence_block = l2.calls[0]["messages"][-1]["content"]
+    assert len(evidence_block) <= configured.max_evidence_chars
+    assert "e" * 24_000 not in evidence_block
 
 
 async def test_verifier_skips_when_fewer_than_minimum_seconds_remain():
