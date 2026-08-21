@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import json
+import multiprocessing
 import subprocess
 import sys
 import threading
@@ -61,15 +62,25 @@ def _server(handler):
 
 class _DripHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    interval_seconds = 0.02
+    bytes_sent = 0
+    sent_multiple_bytes = threading.Event()
 
     def do_POST(self):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", "100000")
         self.end_headers()
-        self.wfile.write(b"{")
-        self.wfile.flush()
-        time.sleep(2.0)
+        for _ in range(500):
+            try:
+                self.wfile.write(b" ")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                return
+            type(self).bytes_sent += 1
+            if type(self).bytes_sent >= 3:
+                type(self).sent_multiple_bytes.set()
+            time.sleep(type(self).interval_seconds)
 
     def log_message(self, format, *args):
         return
@@ -135,9 +146,12 @@ def test_output_path_must_be_outside_the_repository_unless_ignored(tmp_path):
     assert not paired.output_path_allowed(repository / "paired.jsonl", repository)
 
 
-def test_post_json_enforces_an_absolute_deadline_against_a_drip_peer():
-    """An idle-only socket timeout would allow a peer dripping bytes to exceed the gate."""
+def test_post_json_enforces_an_absolute_deadline_against_a_drip_peer(capfd):
+    """Continuous bytes below the socket timeout cannot extend the hard deadline."""
     paired = _load_paired_module()
+    _DripHandler.bytes_sent = 0
+    _DripHandler.sent_multiple_bytes.clear()
+    prior_child_pids = {child.pid for child in multiprocessing.active_children()}
     server = _server(_DripHandler)
     started = time.perf_counter()
     try:
@@ -152,6 +166,13 @@ def test_post_json_enforces_an_absolute_deadline_against_a_drip_peer():
 
     assert (status, payload) == (0, None)
     assert time.perf_counter() - started < 1.0
+    assert _DripHandler.sent_multiple_bytes.is_set()
+    assert _DripHandler.bytes_sent >= 3
+    assert _DripHandler.interval_seconds < 0.2
+    assert all(child.pid in prior_child_pids for child in multiprocessing.active_children())
+    captured = capfd.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
 
 
 def test_serialization_and_jsonl_encoding_fail_closed_without_output(tmp_path):
