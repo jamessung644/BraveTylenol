@@ -16,6 +16,7 @@ Evaluator request -> L2 1회 -> final response
 - 실패 시 느린 자동 재시도를 하지 않습니다.
 - 하나의 async HTTP client와 keep-alive connection을 재사용합니다.
 - 전체 multi-turn history는 순서와 내용을 유지합니다.
+- 평가기가 요청의 `Authorization: Bearer ...`로 전달한 팀 key를 L2 호출에 전달합니다.
 
 Dashboard의 팀 전체 관측값은 Model E2E p50 7.14초, p95 43.00초였습니다. 따라서 이
 베이스라인의 turn당 현실적인 예상 범위는 대략 **7~45초**이며, 기존 다단계 구조처럼 이
@@ -42,7 +43,7 @@ L2 공식 가이드의 generation/retrieval 2단계는 권장 구조이며 필�
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
-| `LUNIT_FM_API_KEY` | 없음 | 필수 팀 API key |
+| `LUNIT_FM_API_KEY` | 없음 | 로컬 실행용 팀 API key; 평가에서는 Bearer header 사용 가능 |
 | `LUNIT_FM_API_URL` | `https://model.hackathon.lunit.io` | L2 endpoint |
 | `LUNIT_FM_MODEL` | `Lunit/L2-preview` | 사용할 Model |
 | `REQUEST_TIMEOUT_SECONDS` | `65` | 단일 L2 호출 deadline |
