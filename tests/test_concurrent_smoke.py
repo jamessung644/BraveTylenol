@@ -191,3 +191,64 @@ def test_cli_normalizes_malformed_base_url_to_aggregate_failure():
     assert result.stdout.startswith("requests=0 success=0 fallback=0 failure=1\n")
     assert result.stderr == ""
     assert "Traceback" not in result.stdout
+
+
+def test_process_start_failure_is_sanitized_for_completion_and_preflight(monkeypatch):
+    """Resource exhaustion while spawning a child must not escape cleanup as an assertion error."""
+    smoke = _load_smoke_module()
+
+    class Connection:
+        def close(self):
+            return None
+
+    class Process:
+        def start(self):
+            raise OSError("resource exhausted")
+
+        def is_alive(self):
+            raise AssertionError("unstarted process inspected")
+
+        def join(self, timeout):
+            raise AssertionError("unstarted process joined")
+
+    class Context:
+        def Pipe(self, duplex):
+            return Connection(), Connection()
+
+        def Process(self, **kwargs):
+            return Process()
+
+    monkeypatch.setattr(smoke.multiprocessing, "get_context", lambda _: Context())
+
+    assert smoke.send_completion("http://127.0.0.1:1", deadline_seconds=0.1).status == 0
+    assert smoke.check_preflight("http://127.0.0.1:1", timeout_seconds=0.1) == [0, 0]
+
+
+def test_cli_rejects_hostile_counts_without_allocating_workers_or_leaking_stderr():
+    """Oversized, zero, and negative runtime limits must fail before pool/list allocation."""
+    started = time.perf_counter()
+    result = _run_smoke_cli(
+        "--base-url",
+        "http://127.0.0.1:1",
+        "--requests",
+        "999999999",
+        "--concurrency",
+        "999999999",
+        "--deadline-seconds",
+        "0",
+    )
+    elapsed = time.perf_counter() - started
+
+    assert result.returncode == 1
+    assert elapsed < 2.0
+    assert result.stdout.startswith("requests=0 success=0 fallback=0 failure=1\n")
+    assert result.stderr == ""
+    assert "Traceback" not in result.stdout
+
+
+def test_effective_workers_preserve_required_16x16_gate():
+    """The production gate must retain all sixteen workers while never exceeding requests."""
+    smoke = _load_smoke_module()
+
+    assert smoke.effective_workers(requests=16, concurrency=16) == 16
+    assert smoke.effective_workers(requests=3, concurrency=16) == 3

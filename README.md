@@ -56,6 +56,8 @@ smoke checker는 health와 models를 먼저 확인한 뒤 같은 한국어 multi
 보냅니다. 200/model/envelope/usage/165초 제한을 검증하고, 정확한 정적 안전 fallback은
 구조적으로 성공으로 세되 별도 집계합니다. 출력은 요청·성공·fallback·실패 수, HTTP 상태 수,
 최소/중앙/최대 지연 시간뿐이며 답변·요청·헤더·예외 상세를 출력하지 않습니다.
+안전한 로컬 gate 범위는 `--requests` 1–256, `--concurrency` 1–32이며 실제 worker 수는 요청
+수를 넘지 않습니다. 기본 16x16 gate는 이 제한 안에서 그대로 16개 worker를 사용합니다.
 
 ## Docker
 
