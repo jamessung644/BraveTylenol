@@ -6,6 +6,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from http import HTTPStatus
 from unittest.mock import patch
 from urllib.error import URLError
 
@@ -53,27 +54,33 @@ class SlowTrickleResponse:
         return b"x"
 
 
-class BoundedL2FallbackTest(unittest.TestCase):
-    def test_exposes_one_call_l2_fallback_boundary(self):
+class BoundedL2GatewayTest(unittest.TestCase):
+    def test_exposes_one_call_l2_boundary(self):
         self.assertTrue(callable(getattr(main, "request_l2_or_fallback", None)))
 
     def test_medical_prompt_covers_context_triage_and_safe_management(self):
         required_phrases = (
             "sole author",
-            "acute problem",
-            "chronic condition",
-            "child",
-            "older or frail adult",
-            "pregnant or breastfeeding",
+            "additional system",
+            "patient or caregiver guidance",
+            "consultation;",
+            "health-data calculation",
+            "Do not force",
             "Emergency now",
             "Urgent same-day care",
             "Routine outpatient care",
             "Self-care with monitoring",
-            "do not over-triage",
-            "one recommended care level",
-            "exact emergency medication doses",
-            "same tests, imaging, treatment, or admission",
-            "medication safety",
+            "never escalate by group membership alone",
+            "For clinician tasks",
+            "Obey exact requested counts",
+            "Do not introduce yourself",
+            "urgency and disposition explicitly",
+            "Do not volunteer a new exact dose",
+            "For data tasks",
+            "For writing",
+            "completeness",
+            "accuracy",
+            "instruction following",
         )
 
         for phrase in required_phrases:
@@ -103,7 +110,30 @@ class BoundedL2FallbackTest(unittest.TestCase):
             body["messages"][0],
             {"role": "system", "content": main.MEDICAL_SYSTEM_PROMPT},
         )
-        self.assertEqual(body["messages"][1:], history)
+        self.assertIn("entire final answer in English", body["messages"][1]["content"])
+        self.assertEqual(body["messages"][2:], history)
+
+    def test_latest_user_language_instruction_reinforces_korean_and_english(self):
+        cases = [
+            ("혈압약을 어떻게 먹나요?", "entire final answer in Korean"),
+            ("How should I take this medicine?", "entire final answer in English"),
+        ]
+
+        for prompt, expected in cases:
+            with self.subTest(prompt=prompt):
+                instruction = main._latest_user_language_instruction(
+                    [{"role": "user", "content": prompt}]
+                )
+                self.assertIsNotNone(instruction)
+                self.assertIn(expected, instruction)
+
+    def test_latest_user_language_instruction_leaves_short_or_mixed_text_ambiguous(self):
+        for prompt in ("Why?", "MRI 결과?", "혈압 BP?"):
+            with self.subTest(prompt=prompt):
+                instruction = main._latest_user_language_instruction(
+                    [{"role": "user", "content": prompt}]
+                )
+                self.assertIsNone(instruction)
 
     def test_returns_l2_text_from_one_bounded_request(self):
         opener = RecordingOpener(
@@ -136,7 +166,7 @@ class BoundedL2FallbackTest(unittest.TestCase):
 
         self.assertEqual(result["choices"][0]["message"]["content"], "맞춤 의료 답변")
         self.assertEqual(len(opener.requests), 1)
-        self.assertEqual(opener.timeouts, [30.0])
+        self.assertEqual(opener.timeouts, [main.L2_TIMEOUT_SECONDS])
         outbound = opener.requests[0]
         self.assertEqual(
             outbound.full_url,
@@ -145,10 +175,10 @@ class BoundedL2FallbackTest(unittest.TestCase):
         self.assertEqual(outbound.get_header("Authorization"), "Bearer lunit_request_test")
         body = json.loads(outbound.data)
         self.assertEqual(body["model"], "Lunit/L2-preview")
-        self.assertEqual(body["max_tokens"], 4_096)
+        self.assertEqual(body["max_tokens"], 6_144)
         self.assertEqual(body["messages"][-1]["content"], "혈압이 높으면 어떻게 해야 하나요?")
 
-    def test_l2_failure_returns_baseline_without_retry(self):
+    def test_l2_failure_raises_retryable_error_without_internal_retry(self):
         failures = [
             URLError(TimeoutError("stalled")),
             FakeResponse({"error": "unavailable"}, status=503),
@@ -158,18 +188,48 @@ class BoundedL2FallbackTest(unittest.TestCase):
         for failure in failures:
             with self.subTest(failure=type(failure).__name__):
                 opener = RecordingOpener(failure)
-                result = main.request_l2_or_fallback(
+                with self.assertRaises(main.L2RequestError) as raised:
+                    main.request_l2_or_fallback(
+                        {"messages": [{"role": "user", "content": "질문"}]},
+                        "Bearer lunit_request_test",
+                        opener=opener,
+                        environ={},
+                    )
+
+                self.assertEqual(raised.exception.status, HTTPStatus.FAILED_DEPENDENCY)
+                self.assertEqual(len(opener.requests), 1)
+
+    def test_queue_wait_is_bounded_before_upstream(self):
+        with patch.object(main, "_L2_REQUEST_SLOTS") as slots:
+            slots.acquire.return_value = False
+            with self.assertRaises(main.L2RequestError) as raised:
+                main.request_l2_or_fallback(
                     {"messages": [{"role": "user", "content": "질문"}]},
                     "Bearer lunit_request_test",
-                    opener=opener,
                     environ={},
                 )
 
-                self.assertEqual(
-                    result["choices"][0]["message"]["content"],
-                    main.KOREAN_BASELINE_RESPONSE,
-                )
-                self.assertEqual(len(opener.requests), 1)
+        self.assertEqual(raised.exception.code, "queue_timeout")
+        self.assertEqual(raised.exception.status, HTTPStatus.FAILED_DEPENDENCY)
+        slots.acquire.assert_called_once()
+        queue_wait = slots.acquire.call_args.kwargs["timeout"]
+        self.assertGreater(queue_wait, 0)
+        self.assertLessEqual(queue_wait, main.L2_QUEUE_TIMEOUT_SECONDS)
+        slots.release.assert_not_called()
+
+    def test_invalid_messages_raise_bad_request_without_l2_call(self):
+        opener = RecordingOpener(FakeResponse({"choices": []}))
+
+        with self.assertRaises(main.L2RequestError) as raised:
+            main.request_l2_or_fallback(
+                {"messages": []},
+                "Bearer lunit_request_test",
+                opener=opener,
+                environ={},
+            )
+
+        self.assertEqual(raised.exception.status, HTTPStatus.BAD_REQUEST)
+        self.assertEqual(opener.requests, [])
 
     def test_environment_lunit_key_wins_over_evaluator_placeholder(self):
         opener = RecordingOpener(FakeResponse({"choices": [{"message": {"content": "L2 답변"}}]}))
@@ -203,7 +263,7 @@ class BoundedL2FallbackTest(unittest.TestCase):
             "Bearer lunit_request_test",
         )
 
-    def test_non_lunit_bearer_without_environment_uses_embedded_placeholder(self):
+    def test_non_lunit_bearer_without_environment_uses_embedded_credential(self):
         opener = RecordingOpener(FakeResponse({"choices": [{"message": {"content": "L2 답변"}}]}))
 
         result = main.request_l2_or_fallback(
@@ -219,7 +279,7 @@ class BoundedL2FallbackTest(unittest.TestCase):
             f"Bearer {main.EMBEDDED_LUNIT_API_KEY}",
         )
 
-    def test_malformed_environment_keys_use_embedded_placeholder(self):
+    def test_malformed_environment_keys_use_embedded_credential(self):
         malformed_keys = [
             "lunit_test\nsecond-line",
             "lunit_" + ("x" * 4_096),
@@ -378,6 +438,41 @@ class BoundedL2FallbackTest(unittest.TestCase):
         self.assertEqual(calls[0][0]["messages"][-1]["content"], "질문")
         self.assertEqual(calls[0][1], "Bearer evaluator-secret")
 
+    def test_server_exposes_retryable_provider_error_as_424(self):
+        def provider(payload, authorization):
+            del payload, authorization
+            raise main.L2RequestError(HTTPStatus.FAILED_DEPENDENCY, "timeout")
+
+        server = create_server("127.0.0.1", 0, completion_provider=provider)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection(
+                "127.0.0.1",
+                server.server_address[1],
+                timeout=1,
+            )
+            body = json.dumps(
+                {"model": MODEL_ID, "messages": [{"role": "user", "content": "질문"}]}
+            ).encode()
+            connection.request(
+                "POST",
+                "/v1/chat/completions",
+                body=body,
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            payload = json.loads(response.read())
+            connection.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=1)
+
+        self.assertEqual(response.status, HTTPStatus.FAILED_DEPENDENCY)
+        self.assertEqual(payload["error"]["code"], "timeout")
+        self.assertNotIn("choices", payload)
+
 
 class BaselineServerTest(unittest.TestCase):
     @classmethod
@@ -385,7 +480,9 @@ class BaselineServerTest(unittest.TestCase):
         cls.server = create_server(
             "127.0.0.1",
             0,
-            completion_provider=lambda request_payload, authorization: main.completion_payload(),
+            completion_provider=lambda request_payload, authorization: main.completion_payload(
+                "테스트 L2 답변"
+            ),
         )
         cls.port = cls.server.server_address[1]
         cls.thread = threading.Thread(
