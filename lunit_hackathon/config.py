@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     )
 
     request_timeout_seconds: float = Field(
-        default=150.0,
+        default=110.0,
         gt=0,
         le=175,
         validation_alias="REQUEST_TIMEOUT_SECONDS",

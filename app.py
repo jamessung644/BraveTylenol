@@ -8,7 +8,8 @@ from time import perf_counter
 from typing import Protocol
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
+from pydantic import SecretStr
 
 from lunit_hackathon.config import Settings
 from lunit_hackathon.errors import (
@@ -62,19 +63,30 @@ def create_app(
         lifespan=lifespan,
     )
 
-    def build_orchestrator() -> ChatOrchestrator:
+    def build_orchestrator(request_settings: Settings) -> ChatOrchestrator:
         shared_http = getattr(application.state, "l2_http_client", None)
-        l2 = L2Client(resolved_settings, http_client=shared_http)
-        if resolved_settings.agent_mode == "passthrough":
+        l2 = L2Client(request_settings, http_client=shared_http)
+        if request_settings.agent_mode == "passthrough":
             return ChatOrchestrator(
                 l2_client=l2,
                 generation_engine=None,
                 mode="passthrough",
             )
+
+        # CoEval sends the API key in the request Bearer header and may not
+        # provide an MCP endpoint. Without MCP, preserve the medical system
+        # prompt but avoid a failed retrieval probe and a second L2 call.
+        if not request_settings.mcp_url:
+            return ChatOrchestrator(
+                l2_client=l2,
+                generation_engine=GenerationEngine(l2, retrieval_engine=None),
+                mode="direct",
+            )
+
         retrieval = RetrievalEngine(
             l2,
-            MCPClient(resolved_settings),
-            resolved_settings,
+            MCPClient(request_settings),
+            request_settings,
         )
         generation = GenerationEngine(l2, retrieval)
         return ChatOrchestrator(
@@ -132,18 +144,23 @@ def create_app(
     )
     async def create_chat_completion(
         request: ChatCompletionRequest,
+        authorization: str | None = Header(default=None),
     ) -> ChatCompletionResponse:
         if request.stream:
             raise HTTPException(status_code=400, detail="Streaming is not supported")
-        if not resolved_settings.api_key:
+        request_api_key = resolved_settings.api_key or _bearer_token(authorization)
+        if not request_api_key:
             raise HTTPException(
                 status_code=503,
                 detail="LUNIT_FM_API_KEY is not configured",
             )
 
-        active_orchestrator = orchestrator or build_orchestrator()
+        request_settings = resolved_settings.model_copy(
+            update={"lunit_fm_api_key": SecretStr(request_api_key)}
+        )
+        active_orchestrator = orchestrator or build_orchestrator(request_settings)
         try:
-            async with asyncio.timeout(resolved_settings.request_timeout_seconds):
+            async with asyncio.timeout(request_settings.request_timeout_seconds):
                 answer = await active_orchestrator.answer(request.messages)
         except TimeoutError as error:
             raise HTTPException(status_code=504, detail="L2 upstream timed out") from error
@@ -176,6 +193,16 @@ def create_app(
         )
 
     return application
+
+
+def _bearer_token(authorization: str | None) -> str | None:
+    if not authorization:
+        return None
+    scheme, separator, token = authorization.partition(" ")
+    if not separator or scheme.lower() != "bearer":
+        return None
+    token = token.strip()
+    return token or None
 
 
 app = create_app()

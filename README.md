@@ -73,7 +73,7 @@ Authorization 값이나 전체 응답 본문을 출력하지 않고 실패한다
 | AGENT_MODE | rag | rag 또는 passthrough |
 | LUNIT_MCP_URL | 없음 | 주최 측이 공식 제공한 MCP URL |
 | MAX_MCP_CALLS | 4 | 한 검색 실행의 최대 MCP 호출 수 |
-| REQUEST_TIMEOUT_SECONDS | 150 | 전체 요청 및 upstream 제한 |
+| REQUEST_TIMEOUT_SECONDS | 110 | Driver 종료 전 제어된 응답을 위한 전체 요청 제한 |
 | L2_RETRY_ATTEMPTS | 1 | 429/502/503/504 제한 재시도 |
 | MAX_TOOL_RESULT_CHARS | 12000 | 개별 도구 결과 크기 제한 |
 | MAX_EVIDENCE_CHARS | 32000 | L2에 전달할 전체 근거 제한 |
@@ -82,7 +82,8 @@ Authorization 값이나 전체 응답 본문을 출력하지 않고 실패한다
 .env.example 형식을 고정하기 위해 선택 설정은 예제 파일에 넣지 않았다. 공식 대회 문서에서
 MCP URL을 확인한 경우에만 개인 .env 또는 배포 환경 변수로 LUNIT_MCP_URL을 추가한다.
 MCP URL이 없거나 MCP가 실패하면 일반화된 의료 안전 프롬프트를 포함한 L2 직접 생성으로
-자동 폴백한다.
+자동 전환한다. MCP URL이 처음부터 없으면 검색 판단 호출도 생략하므로 L2를 정확히 한 번만
+호출한다.
 
 AGENT_MODE=passthrough는 입력 대화를 L2에 바로 보내는 비교/진단 모드다. 최종 제출 기본값은
 rag다.
@@ -127,6 +128,10 @@ Docker가 있는 환경에서 build, /health, /v1/models, 키가 주입된 L2 �
 패키지 설치는 이미지 빌드 단계에서만 필요하다. 빌드 단계도 패키지 저장소에 접근할 수 없는
 정책이라면 주최 측의 사전 빌드 이미지 또는 내부 패키지 미러 요구사항을 공식 규칙에서
 확인해야 한다.
+
+CoEval처럼 컨테이너에 키를 주입하지 않는 평가기는 요청의 `Authorization: Bearer ...`
+헤더로 L2 자격증명을 전달할 수 있다. 서비스는 이 값을 요청 범위에서만 사용하며 저장하거나
+로그에 남기지 않는다.
 
 ## 8. 보안 체크리스트
 

@@ -6,7 +6,7 @@ from httpx import ASGITransport, AsyncClient
 from app import create_app
 from lunit_hackathon.config import Settings
 from lunit_hackathon.errors import UpstreamResponseError
-from lunit_hackathon.schemas import TokenUsage
+from lunit_hackathon.schemas import L2Completion, TokenUsage
 
 
 class FakeOrchestrator:
@@ -63,6 +63,57 @@ async def test_chat_requires_api_key(monkeypatch):
 
     assert response.status_code == 503
     assert orchestrator.calls == []
+
+
+async def test_chat_forwards_evaluator_bearer_key_to_l2(monkeypatch):
+    monkeypatch.delenv("LUNIT_FM_API_KEY", raising=False)
+
+    class RecordingL2:
+        received_api_key = None
+
+        def __init__(self, settings, *, http_client=None):
+            del http_client
+            type(self).received_api_key = settings.api_key
+            self.last_usage = TokenUsage()
+
+        async def complete(self, **kwargs):
+            assert kwargs["messages"][0]["role"] == "system"
+            return L2Completion(content="Bearer 인증 L2 답변")
+
+    monkeypatch.setattr("app.L2Client", RecordingL2)
+    app = create_app(Settings(_env_file=None))
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer evaluator-secret"},
+            json={
+                "model": "team-chatbot",
+                "messages": [{"role": "user", "content": "질문"}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "Bearer 인증 L2 답변"
+    assert RecordingL2.received_api_key == "evaluator-secret"
+
+
+async def test_chat_rejects_non_bearer_authorization(monkeypatch):
+    monkeypatch.delenv("LUNIT_FM_API_KEY", raising=False)
+    app = create_app(Settings(_env_file=None), FakeOrchestrator())
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Basic invalid"},
+            json={"model": "team-chatbot", "messages": [{"role": "user", "content": "질문"}]},
+        )
+
+    assert response.status_code == 503
 
 
 async def test_chat_returns_openai_compatible_l2_completion(monkeypatch):

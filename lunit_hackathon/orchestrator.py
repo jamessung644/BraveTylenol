@@ -17,7 +17,7 @@ class ChatOrchestrator:
         *,
         l2_client: Any,
         generation_engine: Any | None,
-        mode: Literal["rag", "passthrough"],
+        mode: Literal["direct", "rag", "passthrough"],
     ) -> None:
         self._l2 = l2_client
         self._generation = generation_engine
@@ -28,7 +28,15 @@ class ChatOrchestrator:
         if self._mode == "passthrough":
             return await self._passthrough(messages)
         if self._generation is None:
-            raise RuntimeError("RAG mode requires a generation engine")
+            raise RuntimeError("Medical generation mode requires a generation engine")
+
+        # The evaluation container may not receive an MCP endpoint. Skip the
+        # retrieval-decision round trip in that case and ask L2 for the final,
+        # medically prompted answer in exactly one upstream call.
+        if self._mode == "direct":
+            answer = await self._generation.direct_answer(messages)
+            self.last_usage = getattr(self._l2, "last_usage", TokenUsage())
+            return _required_content(answer)
 
         try:
             answer = await self._generation.answer(messages)
