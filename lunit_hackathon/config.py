@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     request_timeout_seconds: float = Field(
         default=165.0,
         gt=0,
-        le=175,
+        le=165.0,
         validation_alias=AliasChoices(
             "REQUEST_TIMEOUT_SECONDS",
             "UPSTREAM_TIMEOUT_SECONDS",
@@ -103,7 +103,7 @@ class Settings(BaseSettings):
     max_mcp_calls: int = Field(
         default=6,
         ge=0,
-        le=12,
+        le=6,
         validation_alias=AliasChoices("MAX_MCP_CALLS", "MAX_TOOL_CALLS"),
     )
     max_tool_result_chars: int = Field(
@@ -115,7 +115,7 @@ class Settings(BaseSettings):
     max_evidence_chars: int = Field(
         default=24_000,
         ge=2_000,
-        le=200_000,
+        le=24_000,
         validation_alias="MAX_EVIDENCE_CHARS",
     )
     log_level: str = Field(
