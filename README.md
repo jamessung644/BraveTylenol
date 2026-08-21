@@ -14,7 +14,7 @@ L2 생성이 실패하면 CoEval이 재시도할 수 있도록 명시적인 오�
 - `lunit_...` 형식의 `LUNIT_FM_API_KEY`가 유효한 요청 Bearer보다 우선
 - L2 호출은 요청당 1회이며 서버 내부 재시도 없음
 - upstream timeout 145초, 요청 전체 deadline 150초, queue wait 최대 5초
-- completion budget 최대 6,144 token, `reasoning_effort=low`, `temperature=0`
+- completion budget 최대 4,096 token, `reasoning_effort=low`, `temperature=0`
 - L2 outbound 동시 실행은 공식 CoEval 동시성과 같은 16개로 제한
 - 응답 본문은 4MB로 제한하며 slow body도 전체 deadline을 넘길 수 없음
 - L2 timeout, HTTP 오류, 빈 응답, 잘못된 JSON은 정적 답변으로 숨기지 않고
