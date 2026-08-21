@@ -8,6 +8,7 @@ from lunit_hackathon.errors import (
     ConfigurationError,
     MalformedUpstreamResponseError,
     UpstreamResponseError,
+    UpstreamTimeoutError,
 )
 from lunit_hackathon.l2_client import L2Client
 
@@ -177,19 +178,19 @@ async def test_retry_and_blank_recovery_share_one_absolute_deadline(monkeypatch)
     async def no_sleep(delay: float) -> None:
         del delay
 
-    clock = iter((100.0, 100.0, 101.0, 110.0, 110.0, 111.0, 120.0, 120.0, 121.0))
+    clock = iter((100.0, 100.0, 101.0, 110.0, 110.0, 111.0, 120.0, 120.0, 121.0, 121.0))
     monkeypatch.setattr("lunit_hackathon.l2_client.perf_counter", lambda: next(clock))
     monkeypatch.setattr("lunit_hackathon.l2_client.asyncio.sleep", no_sleep)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
         client = L2Client(settings, http_client=http_client)
         result = await client.complete(
-            messages=[{"role": "user", "content": "질문"}]
+            messages=[{"role": "user", "content": "질문"}], timeout_seconds=55
         )
 
     assert result.content == "복구 성공"
-    assert [timeout["read"] for timeout in observed_timeouts] == [65, 55, 45]
-    assert [timeout["write"] for timeout in observed_timeouts] == [65, 55, 45]
+    assert [timeout["read"] for timeout in observed_timeouts] == [55, 45, 35]
+    assert [timeout["write"] for timeout in observed_timeouts] == [55, 45, 35]
     assert [timeout["connect"] for timeout in observed_timeouts] == [5, 5, 5]
     assert [timeout["pool"] for timeout in observed_timeouts] == [5, 5, 5]
 
@@ -410,3 +411,69 @@ async def test_upstream_error_does_not_leak_response_message(monkeypatch):
 
     assert "401" in str(caught.value)
     assert "sensitive upstream detail" not in str(caught.value)
+
+
+async def test_complete_applies_per_call_token_and_reasoning_overrides(monkeypatch):
+    settings = settings_with_key(monkeypatch).model_copy(update={"max_completion_tokens": 2048})
+    seen = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "성공"}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        await L2Client(settings, http_client=http_client).complete(
+            messages=[{"role": "user", "content": "질문"}],
+            max_tokens=4096,
+            reasoning_effort="high",
+            timeout_seconds=10,
+        )
+
+    assert seen[0]["max_tokens"] == 2048
+    assert seen[0]["reasoning_effort"] == "high"
+
+
+async def test_complete_rejects_nonpositive_call_timeout_before_network_io(monkeypatch):
+    settings = settings_with_key(monkeypatch)
+    called = False
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, json={"choices": [{"message": {"content": "성공"}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        with pytest.raises(UpstreamTimeoutError):
+            await L2Client(settings, http_client=http_client).complete(
+                messages=[{"role": "user", "content": "질문"}], timeout_seconds=0
+            )
+
+    assert called is False
+
+
+async def test_blank_recovery_keeps_explicit_smaller_token_budget(monkeypatch):
+    settings = settings_with_key(monkeypatch)
+    requests = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {"content": " ", "reasoning": "draft"},
+                            "finish_reason": "length",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(200, json={"choices": [{"message": {"content": "복구"}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        await L2Client(settings, http_client=http_client).complete(
+            messages=[{"role": "user", "content": "질문"}], max_tokens=512, timeout_seconds=10
+        )
+
+    assert [request["max_tokens"] for request in requests] == [512, 512]

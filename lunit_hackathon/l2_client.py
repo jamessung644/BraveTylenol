@@ -4,7 +4,7 @@ import logging
 import re
 from collections.abc import Mapping, Sequence
 from time import perf_counter
-from typing import Any, ClassVar, Self
+from typing import Any, ClassVar, Literal, Self
 
 import httpx
 from pydantic import ValidationError
@@ -60,16 +60,26 @@ class L2Client:
         messages: Sequence[ChatMessage | Mapping[str, Any]],
         tools: Sequence[Mapping[str, Any]] | None = None,
         tool_choice: str | Mapping[str, Any] | None = None,
+        max_tokens: int | None = None,
+        timeout_seconds: float | None = None,
+        reasoning_effort: Literal["low", "medium", "high"] | None = None,
     ) -> L2Completion:
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            raise UpstreamTimeoutError("L2 call timeout is exhausted")
         api_key = self._settings.api_key
         if not api_key:
             raise ConfigurationError("LUNIT_FM_API_KEY is required in .env or the environment")
 
+        call_deadline = perf_counter() + timeout_seconds if timeout_seconds is not None else None
+
         payload: dict[str, Any] = {
             "model": self._settings.lunit_fm_model,
             "messages": [self._serialize_message(message) for message in messages],
-            "max_tokens": self._settings.max_completion_tokens,
-            "reasoning_effort": self._settings.reasoning_effort,
+            "max_tokens": min(
+                max_tokens or self._settings.max_completion_tokens,
+                self._settings.max_completion_tokens,
+            ),
+            "reasoning_effort": reasoning_effort or self._settings.reasoning_effort,
             "temperature": 0.0,
         }
         if tools is not None:
@@ -83,17 +93,14 @@ class L2Client:
             len(tools or []),
             _tool_choice_label(tool_choice),
         )
-        response = await self._post(payload, api_key)
+        response = await self._post(payload, api_key, call_deadline)
         try:
             completion = self._parse_completion(response)
         except MalformedUpstreamResponseError:
             recovery_payload = self._blank_completion_recovery_payload(
                 response=response,
                 original_payload=payload,
-                enabled=(
-                    tools is None
-                    or _forced_tool_name(tool_choice) == "submit_final_answer"
-                ),
+                enabled=(tools is None or _forced_tool_name(tool_choice) == "submit_final_answer"),
             )
             if recovery_payload is None:
                 raise
@@ -101,7 +108,9 @@ class L2Client:
                 self.last_usage,
                 self._response_usage(response),
             )
-            completion = self._parse_completion(await self._post(recovery_payload, api_key))
+            completion = self._parse_completion(
+                await self._post(recovery_payload, api_key, call_deadline)
+            )
         self.last_usage = _sum_usage(self.last_usage, completion.usage)
         self.last_finish_reason = completion.finish_reason
         logger.info(
@@ -157,7 +166,7 @@ class L2Client:
         recovery_payload["messages"] = messages
         recovery_payload["max_tokens"] = min(
             self._RECOVERY_MAX_TOKENS,
-            self._settings.max_completion_tokens,
+            int(original_payload["max_tokens"]),
         )
         return recovery_payload
 
@@ -178,11 +187,16 @@ class L2Client:
         reasoning = message.get("reasoning")
         return reasoning.strip() if isinstance(reasoning, str) else ""
 
-    async def _post(self, payload: Mapping[str, Any], api_key: str) -> httpx.Response:
+    async def _post(
+        self,
+        payload: Mapping[str, Any],
+        api_key: str,
+        call_deadline: float | None,
+    ) -> httpx.Response:
         client = self._client()
 
         for attempt in range(self._settings.retry_attempts + 1):
-            timeout = self._remaining_timeout()
+            timeout = self._remaining_timeout(call_deadline)
             started = perf_counter()
             try:
                 response = await client.post(
@@ -233,11 +247,12 @@ class L2Client:
 
         raise AssertionError("unreachable")
 
-    def _remaining_timeout(self) -> httpx.Timeout:
+    def _remaining_timeout(self, call_deadline: float | None = None) -> httpx.Timeout:
         now = perf_counter()
         if self._deadline is None:
             self._deadline = now + self._settings.request_timeout_seconds
-        remaining = self._deadline - now
+        absolute_deadline = min(self._deadline, call_deadline) if call_deadline else self._deadline
+        remaining = absolute_deadline - now
         if remaining <= 0:
             raise UpstreamTimeoutError("L2 request deadline exhausted")
         short_timeout = min(5.0, remaining)
