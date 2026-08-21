@@ -333,7 +333,7 @@ async def test_generation_retrieves_then_resumes_same_trajectory_without_more_to
     assert answer == "근거를 반영한 답변 [1]"
     assert retrieval.queries == ["공식 진료지침 목표 혈압은?"]
     assert l2.calls[0]["attempt_timeout_seconds"] == 25
-    assert l2.calls[1]["attempt_timeout_seconds"] == 45
+    assert l2.calls[1]["attempt_timeout_seconds"] == 145
     assert l2.calls[1]["max_tokens"] == 4_096
     assert l2.calls[1]["allow_blank_recovery"] is False
     assert "tools" not in l2.calls[1]
@@ -655,7 +655,7 @@ async def test_required_retrieval_degrades_to_l2_no_evidence_answer_after_two_ig
     assert answer == "공식 근거를 확인하지 못했다고 밝힌 제한적 답"
     assert retrieval.queries == []
     assert len(l2.calls) == 3
-    assert l2.calls[2]["attempt_timeout_seconds"] == 45
+    assert l2.calls[2]["attempt_timeout_seconds"] == 145
     assert l2.calls[2]["allow_blank_recovery"] is False
 
 
@@ -1290,7 +1290,7 @@ async def test_emergency_guard_skips_retrieval_and_keeps_l2_as_author():
 
     assert answer == "119에 즉시 연락하세요."
     assert "tools" not in l2.calls[0]
-    assert l2.calls[0]["attempt_timeout_seconds"] == 45
+    assert l2.calls[0]["attempt_timeout_seconds"] == 145
     assert l2.calls[0]["max_tokens"] == 2_048
     assert l2.calls[0]["allow_blank_recovery"] is False
     assert "시간 민감한 건강 위험" in l2.calls[0]["messages"][0]["content"]
@@ -1701,7 +1701,7 @@ async def test_emergency_protocol_output_gets_one_fresh_final_only_recovery():
     )
 
     assert answer == "현재 증상이면 즉시 응급서비스에 연락하세요."
-    assert [call["attempt_timeout_seconds"] for call in l2.calls] == [45, 30]
+    assert [call["attempt_timeout_seconds"] for call in l2.calls] == [145, 145]
     assert l2.calls[0]["allow_blank_recovery"] is False
     assert l2.calls[1]["allow_blank_recovery"] is False
     recovery = l2.calls[1]["messages"]
@@ -1733,7 +1733,7 @@ async def test_generation_requests_l2_correction_when_numeric_citation_is_missin
 
     assert answer == "교정된 답변 [1]"
     assert "tools" not in l2.calls[2]
-    assert l2.calls[2]["attempt_timeout_seconds"] == 30
+    assert l2.calls[2]["attempt_timeout_seconds"] == 145
     assert l2.calls[2]["max_tokens"] == 4_096
     assert l2.calls[2]["allow_blank_recovery"] is False
 
@@ -1968,7 +1968,7 @@ async def test_initial_final_timeout_gets_one_fresh_bounded_recovery():
     )
 
     assert answer == "복구된 최종 답변"
-    assert [call["attempt_timeout_seconds"] for call in l2.calls] == [45, 30]
+    assert [call["attempt_timeout_seconds"] for call in l2.calls] == [145, 145]
     assert l2.calls[0]["max_tokens"] == 4_096
     assert l2.calls[1]["max_tokens"] == 4_096
     assert l2.calls[1]["allow_blank_recovery"] is False
@@ -2173,7 +2173,7 @@ async def test_mcp_failure_authoritative_claim_gets_clean_l2_recovery(
     assert unsupported_claim not in json.dumps(
         l2.calls[2]["messages"], ensure_ascii=False
     )
-    assert [call["attempt_timeout_seconds"] for call in l2.calls] == [25, 45, 30]
+    assert [call["attempt_timeout_seconds"] for call in l2.calls] == [25, 145, 145]
 
 
 async def test_successful_retrieval_with_no_citable_content_uses_no_evidence_guard():
@@ -2341,18 +2341,22 @@ async def test_grounded_authoritative_claim_and_direct_general_answer_are_unaffe
     assert len(direct_l2.calls) == 1
 
 
-def test_worst_case_generation_path_stays_within_request_deadline():
-    retrieval_hard_slice_seconds = 50
-    worst_case = (
-        generation_module._INITIAL_TOOL_TIMEOUT_SECONDS
-        + generation_module._FORCED_TOOL_RETRY_TIMEOUT_SECONDS
-        + retrieval_hard_slice_seconds
-        + generation_module._FINAL_GENERATION_TIMEOUT_SECONDS
-        + generation_module._RECOVERY_TIMEOUT_SECONDS
-    )
-
-    assert worst_case == 160
-    assert worst_case <= 165
+def test_phase_attempt_caps_share_the_absolute_request_deadline():
+    # These are per-attempt ceilings, not additive reservations. L2Client uses
+    # one request-scoped absolute deadline, so a final or recovery receives only
+    # the time still remaining after decision and Retrieval work.
+    assert generation_module._INITIAL_TOOL_TIMEOUT_SECONDS == 25
+    assert generation_module._FORCED_TOOL_RETRY_TIMEOUT_SECONDS == 10
+    assert generation_module._FINAL_GENERATION_TIMEOUT_SECONDS == 145
+    assert generation_module._RECOVERY_TIMEOUT_SECONDS == 145
+    assert generation_module._EMERGENCY_TIMEOUT_SECONDS == 145
+    assert max(
+        generation_module._INITIAL_TOOL_TIMEOUT_SECONDS,
+        generation_module._FORCED_TOOL_RETRY_TIMEOUT_SECONDS,
+        generation_module._FINAL_GENERATION_TIMEOUT_SECONDS,
+        generation_module._RECOVERY_TIMEOUT_SECONDS,
+        generation_module._EMERGENCY_TIMEOUT_SECONDS,
+    ) <= 165
 
 
 def test_generation_source_contains_no_extra_final_answer_tool():

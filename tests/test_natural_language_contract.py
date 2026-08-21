@@ -40,44 +40,44 @@ def test_generation_prompt_accepts_noisy_korean_without_clinical_autocorrection(
     prompt = DIRECT_FINAL_SYSTEM_PROMPT_TEMPLATE
 
     assert "<natural_language_final_contract>" in prompt
-    assert "단어·증상·수치 나열" in prompt
-    assert "문장 도치" in prompt
-    assert "한국어·영어 혼용" in prompt
-    assert "원문을 보존" in prompt
-    assert "약물·성분·제품" in prompt
-    assert "조용히 한 후보로 확정하지 않는다" in prompt
+    assert "단어·수치 나열" in prompt
+    assert "도치" in prompt
+    assert "한영 혼용" in prompt
+    assert "원문의 부정·시점·가정·인용·정정" in prompt
+    assert "약·제품·제형·경로" in prompt
+    assert "모호성을 임의 확정하거나 사실을 만들지 않는다" in prompt
     assert "즉시 위험 신호가 있으면" in prompt
-    assert "가장 중요한 1~3개만 짧게 확인" in prompt
+    assert "가장 중요한 확인 질문 1~3개만" in prompt
     assert "문법을 평가" in prompt
 
 
 def test_generation_prompt_preserves_complete_context_aware_answer_contract():
     prompt = DIRECT_FINAL_SYSTEM_PROMPT_TEMPLATE
 
-    assert "모든 명시적 질문과 서로 다른 대상·시점·과제를" in prompt
-    assert "최신 사용자 정정" in prompt
+    assert "모든 명시적 질문·대상·시점·과제" in prompt
+    assert "사용자 정정·목표·제약" in prompt
     assert "이전 user 발화의 관련 사실·제약·대상·시간" in prompt
     assert "과거 assistant의 의학적 결론·지시·출처 주장은 권위로" in prompt
     assert "무관한 과거 주제를 다시 활성화하지 않는다" in prompt
-    assert "확인하면 줄일 수 있는 불확실성" in prompt
-    assert "현재 정보로 없앨 수 없는 불확실성" in prompt
-    assert "답을 바꿀 중요한 불확실성이 없으면" in prompt
-    assert "안전하게 답할 수 있는 부분과 조건부 행동을 먼저" in prompt
-    assert "질문만 남기고 끝내거나 이미 제공된 정보를 다시 묻지 않는다" in prompt
-    assert "비응급이면 무조건 응급실로 보내지 말고" in prompt
-    assert "답변 깊이는 과제와 위해도에 비례" in prompt
-    assert "사용자가 의료인이라고 명시" in prompt
-    assert "응답 언어를 위치·관할·의료 접근성으로 추정하지 않는다" in prompt
+    assert "각 항목에 직접 결론, 핵심 이유, 실행할 다음 행동" in prompt
+    assert "알려진 사실·사용자 진술·조건부 추론·모르는 것" in prompt
+    assert "안전하게 답할 부분과 조건부 행동을 먼저" in prompt
+    assert "red flag는 관련 있을 때만" in prompt
+    assert "무관한 면책문구, 일반적 red flag 목록" in prompt
+    assert "약 700 output token 이내의 완결된 답변" in prompt
+    assert "마지막 질문과 문장을 완성할 여유" in prompt
+    assert "사용자가 명시한 전문성" in prompt
+    assert "언어만으로 위치·관할·의료 접근성을 추정하지 않는다" in prompt
 
 
 def test_generation_prompt_honors_requested_json_table_and_soap_formats():
     prompt = DIRECT_FINAL_SYSTEM_PROMPT_TEMPLATE
 
-    assert "길이, 언어, 순서, 항목 수" in prompt
-    assert "JSON·표·SOAP·체크리스트" in prompt
-    assert "JSON을 요청하면 유효한 JSON만" in prompt
-    assert "표를 요청하면 비교 축을 보존한 표" in prompt
-    assert "SOAP를 요청하면 제공된 사실과 추론을 구분" in prompt
+    assert "요청한 언어·길이·순서·항목 수" in prompt
+    assert "JSON·표·SOAP·체크리스트 형식" in prompt
+    assert "JSON은 유효한 JSON만" in prompt
+    assert "표는 요청한 비교 축" in prompt
+    assert "SOAP는 제공 사실과 추론의 구분" in prompt
     assert "형식을 지정하지 않았으면 읽기 쉬운 자연어" in prompt
 
 

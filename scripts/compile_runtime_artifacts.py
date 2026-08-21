@@ -64,6 +64,8 @@ _FORBIDDEN_FINAL_PROMPT_PROTOCOL = (
     "retrieval mode:",
     "emergency_no_tool",
 )
+MAX_FINAL_ANSWER_POLICY_CHARS = 1_200
+MAX_FINAL_GENERATION_PROMPT_CHARS = 3_000
 
 
 class CompileError(RuntimeError):
@@ -432,6 +434,10 @@ def compile_bundle(source_root: Path, runtime_sources: Path) -> dict[str, Any]:
         for field in ("final_answer_policy", "generation_policy", "retrieval_policy")
     ):
         raise CompileError("natural-language prompt policies must be non-empty strings")
+    if len(natural_language["final_answer_policy"]) > MAX_FINAL_ANSWER_POLICY_CHARS:
+        raise CompileError(
+            "final-answer natural-language policy exceeds compact character budget"
+        )
 
     documents: dict[str, str] = {}
     source_manifest: dict[str, dict[str, Any]] = {}
@@ -502,6 +508,8 @@ def compile_bundle(source_root: Path, runtime_sources: Path) -> dict[str, Any]:
             marker in prompt.casefold() for marker in _FORBIDDEN_FINAL_PROMPT_PROTOCOL
         ):
             raise CompileError(f"Generation {phase} prompt contains tool protocol")
+        if phase != "tool_decision" and len(prompt) > MAX_FINAL_GENERATION_PROMPT_CHARS:
+            raise CompileError(f"Generation {phase} prompt exceeds compact character budget")
     if _UPPER_TOKEN.findall(retrieval) or _UPPER_TOKEN.findall(routing):
         raise CompileError("Retrieval prompt contains unresolved build placeholders")
     for token in BUILD_PLACEHOLDERS:

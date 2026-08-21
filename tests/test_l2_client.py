@@ -255,10 +255,23 @@ async def test_retry_and_blank_recovery_share_one_absolute_deadline(monkeypatch)
         )
 
     assert result.content == "복구 성공"
-    assert [timeout["read"] for timeout in observed_timeouts] == [45, 45, 45]
-    assert [timeout["write"] for timeout in observed_timeouts] == [45, 45, 45]
+    assert [timeout["read"] for timeout in observed_timeouts] == [65, 55, 45]
+    assert [timeout["write"] for timeout in observed_timeouts] == [65, 55, 45]
     assert [timeout["connect"] for timeout in observed_timeouts] == [5, 5, 5]
     assert [timeout["pool"] for timeout in observed_timeouts] == [5, 5, 5]
+
+
+def test_remaining_request_seconds_uses_the_shared_absolute_deadline(monkeypatch):
+    settings = settings_with_key(monkeypatch).model_copy(
+        update={"request_timeout_seconds": 165}
+    )
+    clock = iter((120.0,))
+    monkeypatch.setattr("lunit_hackathon.l2_client.perf_counter", lambda: next(clock))
+    client = L2Client(settings)
+
+    assert client.remaining_request_seconds() == 165
+    client._deadline = 265.0
+    assert client.remaining_request_seconds() == 145
 
 
 async def test_complete_accumulates_usage_across_generation_steps(monkeypatch):

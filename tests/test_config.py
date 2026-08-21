@@ -90,7 +90,7 @@ def test_latency_controls_have_safe_defaults(monkeypatch):
     settings = Settings(_env_file=None)
 
     assert settings.request_timeout_seconds == 165
-    assert settings.model_attempt_timeout_seconds == 45
+    assert settings.model_attempt_timeout_seconds == 145
     assert settings.max_completion_tokens == 4096
     assert settings.reasoning_effort == "low"
     assert settings.retry_attempts == 0

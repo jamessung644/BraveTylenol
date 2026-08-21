@@ -53,9 +53,9 @@ class Settings(BaseSettings):
         ),
     )
     model_attempt_timeout_seconds: float = Field(
-        default=45.0,
+        default=145.0,
         gt=0,
-        le=45,
+        le=145,
         validation_alias="MODEL_ATTEMPT_TIMEOUT_SECONDS",
     )
     retry_attempts: int = Field(

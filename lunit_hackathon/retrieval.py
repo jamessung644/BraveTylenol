@@ -285,10 +285,28 @@ class RetrievalEngine:
         # budget so the first routing turn and the final L2-authored answer each
         # retain their own time slice. A slow MCP dependency therefore degrades to
         # no-evidence instead of causing a user-visible end-to-end timeout.
+        remaining_request = self._settings.request_timeout_seconds
+        remaining_budget = getattr(self._l2, "remaining_request_seconds", None)
+        if callable(remaining_budget):
+            remaining_request = float(remaining_budget())
+        # The official L2 needed roughly 104 seconds for a compact, valid final
+        # answer in the release canary.  Never let optional evidence work consume
+        # the final-answer window; a bounded no-evidence final is safer than an
+        # end-to-end 504 after successful MCP transport.
+        final_answer_reserve = min(
+            120.0,
+            self._settings.request_timeout_seconds * 0.75,
+        )
         retrieval_timeout = min(
             50.0,
             self._settings.request_timeout_seconds * 0.31,
+            remaining_request - final_answer_reserve,
         )
+        if retrieval_timeout <= 0:
+            raise RetrievalError(
+                "Retrieval skipped to preserve the final answer budget",
+                code="retrieval_final_reserve",
+            )
         try:
             async with asyncio.timeout(retrieval_timeout):
                 return await self._retrieve(query)

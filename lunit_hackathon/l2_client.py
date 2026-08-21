@@ -57,6 +57,13 @@ class L2Client:
             await self._http_client.aclose()
             self._http_client = None
 
+    def remaining_request_seconds(self) -> float:
+        """Return the request-scoped L2 budget without starting its clock."""
+
+        if self._deadline is None:
+            return self._settings.request_timeout_seconds
+        return max(0.0, self._deadline - perf_counter())
+
     async def complete(
         self,
         *,

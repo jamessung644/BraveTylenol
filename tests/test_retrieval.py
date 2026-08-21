@@ -1099,6 +1099,45 @@ async def test_retrieval_timeout_becomes_recoverable_error(monkeypatch):
     assert caught.value.code == "retrieval_timeout"
 
 
+async def test_retrieval_preserves_a_120_second_final_answer_reserve(monkeypatch):
+    class BudgetedL2(ScriptedL2):
+        def remaining_request_seconds(self):
+            return 120.01
+
+    class SlowMCP(FakeMCP):
+        async def list_tools(self):
+            await asyncio.sleep(1)
+            return []
+
+    engine = RetrievalEngine(
+        BudgetedL2([]),
+        SlowMCP([], {}),
+        settings(monkeypatch),
+    )
+
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(RetrievalError) as caught:
+        await engine.retrieve("query")
+
+    assert caught.value.code == "retrieval_timeout"
+    assert asyncio.get_running_loop().time() - started < 0.1
+
+
+async def test_retrieval_skips_when_only_the_final_answer_reserve_remains(monkeypatch):
+    class BudgetedL2(ScriptedL2):
+        def remaining_request_seconds(self):
+            return 120.0
+
+    mcp = FakeMCP([], {})
+    engine = RetrievalEngine(BudgetedL2([]), mcp, settings(monkeypatch))
+
+    with pytest.raises(RetrievalError) as caught:
+        await engine.retrieve("query")
+
+    assert caught.value.code == "retrieval_final_reserve"
+    assert mcp.list_calls == 0
+
+
 async def test_retrieval_planner_timeout_becomes_recoverable_error(monkeypatch):
     class TimedOutL2(ScriptedL2):
         async def complete(self, **kwargs):

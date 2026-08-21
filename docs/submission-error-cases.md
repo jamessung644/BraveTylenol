@@ -56,6 +56,30 @@ Use this checklist before promoting a submission commit.
   runtime suite separate, and require the packaging test to show that excluded
   legacy files cannot affect the image.
 
+## Model latency and final-answer starvation
+
+- A successful short greeting does not establish a safe medical-answer timeout.
+  The official L2 returned a compact direct medical answer with `stop` only after
+  about 104 seconds; 45-second phase limits caused systematic 504 responses, and
+  a 1,024-token attempt completed late with `length` rather than a usable final.
+- Keep the release final/emergency attempt ceiling at 145 seconds and the regular
+  output ceiling at 4,096 until a paired live gate proves a smaller setting.
+  Retrieval is optional and must preserve the configured final-answer reserve;
+  successful MCP transport followed by a starved final is still a failed request.
+- Validate direct, emergency, MCP-success, and MCP-failure paths separately.
+  Record aggregate status, latency, finish reason, call count, and citation yield,
+  but never credentials, prompts, answers, raw evidence, or citation identifiers.
+
+## Approved official-network validation
+
+- Runtime validation may use the team credential without an artificial question
+  count limit, but outbound traffic remains restricted to the official Lunit
+  Model and MCP endpoints. This does not authorize hidden-test access or arbitrary
+  Internet calls.
+- Treat synthetic fixture generations as append-only after observation. Broad
+  evaluation may add new permanent cases, but must not rewrite an observed case
+  to fit its result.
+
 ## Natural-language regression retention
 
 - Do not equate a grammatical form with clinical urgency. A noun-like fragment

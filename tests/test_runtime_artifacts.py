@@ -88,6 +88,32 @@ def test_compiler_is_byte_deterministic(tmp_path):
     assert first_digest == second_digest == hashlib.sha256(BUNDLE.read_bytes()).hexdigest()
 
 
+def test_compiler_rejects_oversized_shared_final_answer_policy(tmp_path):
+    runtime_sources = tmp_path / "runtime_sources"
+    shutil.copytree(PROJECT_ROOT / "runtime_sources", runtime_sources)
+    policy_path = runtime_sources / "natural_language_policy_ko_v1.json"
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    policy["final_answer_policy"] = "x" * 1_201
+    policy_path.write_text(
+        json.dumps(policy, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    result = _run_compiler(
+        "--source-root",
+        str(SOURCE_ROOT),
+        "--runtime-sources",
+        str(runtime_sources),
+        "--output",
+        str(tmp_path / "bundle.json"),
+    )
+
+    assert result.returncode == 2
+    assert "final-answer natural-language policy exceeds compact character budget" in (
+        result.stderr
+    )
+
+
 def test_loader_rejects_any_bundle_byte_tampering(tmp_path):
     copied = tmp_path / BUNDLE.name
     shutil.copyfile(BUNDLE, copied)
@@ -366,18 +392,22 @@ def test_all_final_phase_prompts_share_healthbench_aligned_answer_policy():
         if phase != "tool_decision"
     }
     required_contracts = (
-        "모든 명시적 질문과 서로 다른 대상·시점·과제를",
-        "확인하면 줄일 수 있는 불확실성",
-        "현재 정보로 없앨 수 없는 불확실성",
-        "답을 바꿀 중요한 불확실성이 없으면",
-        "조건부 행동을 먼저 제시한 뒤 가장 중요한 1~3개",
-        "현재 즉시 위험이 합리적으로 의심되면",
-        "비응급이면 무조건 응급실로 보내지 말고",
-        "답변 깊이는 과제와 위해도에 비례",
-        "사용자가 의료인이라고 명시",
-        "응답 언어를 위치·관할·의료 접근성으로 추정하지 않는다",
-        "JSON·표·SOAP·체크리스트",
-        "요청 형식에 맞춘 완결된 답변",
+        "정확성:",
+        "완전성·맥락:",
+        "모든 명시적 질문·대상·시점·과제",
+        "각 항목에 직접 결론, 핵심 이유, 실행할 다음 행동",
+        "알려진 사실·사용자 진술·조건부 추론·모르는 것",
+        "우선순위·안전:",
+        "red flag는 관련 있을 때만",
+        "무관한 면책문구, 일반적 red flag 목록",
+        "간결한 종료:",
+        "약 700 output token 이내의 완결된 답변",
+        "마지막 질문과 문장을 완성할 여유",
+        "요청 항목과 필요한 행동·한계·인용을 모두 다루면 즉시 끝낸다",
+        "소통:",
+        "언어만으로 위치·관할·의료 접근성을 추정하지 않는다",
+        "지시 준수:",
+        "JSON·표·SOAP·체크리스트 형식",
     )
 
     assert set(final_templates) == {
@@ -395,6 +425,8 @@ def test_all_final_phase_prompts_share_healthbench_aligned_answer_policy():
         "형식을 지정하지 않았으면 읽기 쉬운 자연어" in prompt
         for prompt in final_templates.values()
     )
+    assert len(DIRECT_FINAL_SYSTEM_PROMPT_TEMPLATE) <= 2_400
+    assert all(len(prompt) <= 3_000 for prompt in final_templates.values())
     assert "전용 `근거` field 또는 section" in (
         POST_RETRIEVAL_FINAL_SYSTEM_PROMPT_TEMPLATE
     )

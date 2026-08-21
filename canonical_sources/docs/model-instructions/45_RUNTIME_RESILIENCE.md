@@ -210,6 +210,7 @@ Dashboard evaluator trial로 실제 문법을 확정하고 그보다 넓게 자�
 ### Tool deadline·retry
 
 - 전체 request deadline 아래에 Generation, Retrieval, 개별 MCP deadline을 계층적으로 배분한다.
+- Retrieval 시작 전 final L2용 `min(120초, request deadline의 75%)`를 보존한다. 실제 Retrieval slice는 `min(50초, request deadline × 0.31, 현재 남은 deadline − final reserve)`이며 양수가 아니면 MCP를 시작하지 않고 검증된 failure final로 단조 하향한다.
 - Retry는 read-only·idempotent 호출의 timeout, 408, 429, 일시적 5xx에만 제한한다.
 - 400, 401, 403, schema invalid는 재시도하지 않는다.
 - `Retry-After`, exponential backoff와 jitter를 적용하되 전체 deadline을 넘지 않는다.
@@ -227,7 +228,7 @@ Dashboard evaluator trial로 실제 문법을 확정하고 그보다 넓게 자�
 
 ### Clean final recovery
 
-- 이 recovery는 `direct_final`, `post_retrieval_final`, `mcp_failure_final`, `emergency_final`의 결정적 invalid output 또는 최초 final L2 timeout에 공통으로 최대 한 번 적용한다. Recovery는 30초·1,536-token 상한이며 client 내부 retry를 사용하지 않는다.
+- 이 recovery는 `direct_final`, `post_retrieval_final`, `mcp_failure_final`, `emergency_final`의 결정적 invalid output 또는 최초 final L2 timeout에 공통으로 최대 한 번 적용한다. Final과 recovery의 개별 attempt ceiling은 최대 145초지만 둘을 더한 별도 예산이 아니며, 같은 request-scoped absolute deadline에서 앞 단계가 사용하고 남은 시간만 허용한다. Recovery token ceiling은 일반 final과 같은 4,096으로 두어 최초 length 실패보다 구조적으로 더 잘리지 않게 하며 client 내부 retry를 사용하지 않는다.
 - Empty content, 허용되지 않은 finish reason, tool call·pseudo tool syntax·등록된 function name 노출, 존재하지 않는 citation, no-evidence phase의 단정적 권위 주장 등 첫 response byte 전에 판정 가능한 위반만 대상으로 한다.
 - Harness는 invalid draft와 tool-decision transcript를 폐기하고 Retrieval을 다시 실행하지 않는다. 같은 frozen evaluator history, latest user, application context와 trusted final-phase context로 fresh `clean_recovery_final` request를 만들며 tool을 등록하지 않는다.
 - Recovery transcript에는 이전 assistant draft, application/MCP tool call·result, validator feedback용 자유형 의료문을 append하지 않는다. Frozen evidence가 있으면 final context의 검증된 숫자 citation만 다시 사용할 수 있다.

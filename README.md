@@ -72,15 +72,16 @@ system prompt를 붙이는 진단용이다.
 | 항목 | 기본값 | 역할 |
 | --- | ---: | --- |
 | 전체 요청 | 165초 | API 요청의 절대 상한 |
-| L2 generic/default attempt | 45초 | direct·passthrough 및 단계별 override가 없는 model 호출 상한 |
+| L2 generic/default attempt | 최대 145초 | direct·passthrough 및 단계별 override가 없는 model 호출 상한; 항상 남은 전체 요청 deadline 이하 |
 | L2 retry | 0회 | 재시도 꼬리 지연 제거 |
 | RAG initial application-tool | 25초 | retrieval query 생성 단계 |
 | forced-tool retry | 10초 | source-dependent 요청에서 tool call 누락 시 한 번만 강제 |
-| emergency final | 45초, 최대 2,048 tokens | deterministic guard가 선택한 fresh no-tool 최종 단계 상한 |
-| Retrieval hard slice | `min(50초, 165초 × 0.31)` = 50초 | MCP와 Retrieval planner 전체 격리 |
-| Retrieval planner L2 | attempt당 25초 | MCP call 계획과 local finalization 단계; 전체 Retrieval 50초 상한 안에서 동작 |
-| final Generation | 45초, 최대 4,096 tokens | evidence/no-evidence 이후 사용자 답변 reserve |
-| clean final recovery | 30초, 최대 4,096 tokens | final 출력의 구조·citation 검증 실패 또는 최초 final timeout 시 fresh no-tool 재작성 상한 |
+| emergency final | 최대 145초, 최대 2,048 tokens | deterministic guard가 선택한 fresh no-tool 최종 단계; 남은 전체 요청 deadline 적용 |
+| Retrieval hard slice | 최대 45초, 매 단계 동적 재계산 | `min(50초, request × 0.31, 남은 deadline − final reserve)`로 MCP와 planner 격리 |
+| final reserve | 기본 120초 | Retrieval 시작 전에 반드시 남겨 두며, 짧은 비운영 deadline에서는 request의 75%로 축소 |
+| Retrieval planner L2 | attempt당 25초 | MCP call 계획과 local finalization 단계; 동적 Retrieval 상한 안에서 동작 |
+| final Generation | 최대 145초, 최대 4,096 tokens | evidence/no-evidence 이후 사용자 답변; 남은 전체 요청 deadline 적용 |
+| clean final recovery | 최대 145초, 최대 4,096 tokens | final 검증 실패 또는 최초 final timeout 시 남은 전체 요청 deadline 안의 fresh no-tool 재작성 |
 | RAG admission | 16개 | 공식 C16 cohort를 수용하고 초과 요청은 즉시 하향 |
 | MCP remote call | 기본 3회, release ceiling 3회 | 실제 호출은 도메인 ceiling 1~3회로 제한 |
 | L2 동시 호출 | 16개 | CoEval 동시성에 맞춘 upstream 보호 |
@@ -99,7 +100,7 @@ normal Retrieval route를 새로 시작하지 않는다. 이 no-evidence 응급 
 sanitized 502로 종료한다.
 
 MCP client 자체를 무기한 기다리게 두는 구조가 아니다. Discovery·planning·remote call 전체를
-50초 Retrieval hard slice 안에 격리하고, 초과·연결 실패·schema 오류는 검증된 실패 상태로
+최대 45초의 동적 Retrieval hard slice 안에 격리하고 final L2에 기본 120초를 남긴다. 초과·연결 실패·schema 오류는 검증된 실패 상태로
 단조 하향한다. 이후 frozen inbound와 failure context에서 fresh `mcp_failure_final` L2 request를
 만들어 출처를 찾았다고 가장하지 않는 최종 답변을 작성한다. Tool-decision·MCP transcript와 raw
 protocol은 이 final request나 사용자 출력에 포함하지 않는다. 따라서 MCP 장애가 user-visible

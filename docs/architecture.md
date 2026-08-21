@@ -170,15 +170,16 @@ Configured 값은 artifact ceiling과 domain ceiling을 넘지 못하며 `AGENT_
 | Budget | 기본값 | 설계 의도 |
 | --- | ---: | --- |
 | request deadline | 165초 | 모든 L2/MCP 단계의 절대 상한 |
-| generic/default model attempt | 45초 | 단계별 override가 없는 model 호출 상한 |
+| generic/default model attempt | 최대 145초 | 단계별 override가 없는 model 호출 상한; 항상 남은 전체 요청 deadline 이하 |
 | model retry | 0 | tail latency 억제 |
 | RAG initial application-tool | 25초 | retrieval query 생성 |
 | forced-tool retry | 10초 | 명시적 source 요청에서 tool call 누락 시 한 번만 재강제 |
-| emergency final | 45초, 최대 2,048 tokens | 검색 전 즉시 행동 답변 |
-| retrieval hard slice | `min(50초, request × 0.31)` = 50초 | MCP와 planner 전체 격리 |
-| retrieval planner L2 | attempt당 25초 | remote call 계획 및 local finalization; 전체 Retrieval 50초 상한 적용 |
-| final Generation | 45초, 최대 4,096 tokens | evidence/no-evidence 뒤 사용자 답변 reserve |
-| clean final recovery | 30초, 최대 4,096 tokens | plain text·종료 사유·인용 invariant 재생성 또는 최초 final timeout 복구, 정확히 1회 |
+| emergency final | 최대 145초, 최대 2,048 tokens | 검색 전 즉시 행동 답변; 남은 전체 요청 deadline 적용 |
+| retrieval hard slice | 최대 45초, 매 단계 동적 재계산 | `min(50초, request × 0.31, 남은 deadline − final reserve)`로 MCP와 planner 격리 |
+| final reserve | 기본 120초 | Retrieval 전 반드시 보존; 짧은 비운영 deadline에서는 request의 75% |
+| retrieval planner L2 | attempt당 25초 | remote call 계획 및 local finalization; 동적 Retrieval 상한 적용 |
+| final Generation | 최대 145초, 최대 4,096 tokens | evidence/no-evidence 뒤 사용자 답변; 남은 전체 요청 deadline 적용 |
+| clean final recovery | 최대 145초, 최대 4,096 tokens | 남은 전체 요청 deadline 안에서 plain text·종료 사유·인용 invariant 재생성 또는 최초 final timeout 복구, 정확히 1회 |
 | RAG admission | 16 | 공식 C16 cohort를 수용하고 초과 요청은 즉시 하향 |
 | MCP call | configured 기본 3, effective ceiling 1~3 | artifact·설정·도메인 중 최솟값으로 tool loop 상한 |
 | model semaphore | 16 | CoEval 동시성에 맞춘 보호 |
