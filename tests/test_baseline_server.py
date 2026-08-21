@@ -178,6 +178,39 @@ class BoundedL2GatewayTest(unittest.TestCase):
         self.assertEqual(body["max_tokens"], 4_096)
         self.assertEqual(body["messages"][-1]["content"], "혈압이 높으면 어떻게 해야 하나요?")
 
+    def test_complex_request_still_uses_only_one_l2_generation(self):
+        opener = RecordingOpener(
+            FakeResponse({"choices": [{"message": {"content": "완전한 1차 답변"}}]})
+        )
+        question = (
+            "3일째 발열과 배아픔, 구토가 이어지고 있습니다. 가능한 원인을 "
+            "우선순위로 비교하고, 필요한 검사와 집에서 할 수 있는 관리 방법, "
+            "병원에 가야 할 시점과 응급실에 바로 가야 할 위험 신호를 모두 "
+            "구분해서 설명해주세요. 각 조치의 이유와 경과 관찰 기간도 함께 "
+            "알려주세요. 연령대와 증상의 변화에 따라 판단이 달라질 수 있는 "
+            "부분과 추가 진료 후 다시 확인해야 할 사항까지 누락 없이 정리해주세요."
+        )
+
+        result = main.request_l2_or_fallback(
+            {"messages": [{"role": "user", "content": question}]},
+            "Bearer lunit_request_test",
+            opener=opener,
+            environ={},
+        )
+
+        self.assertEqual(result["choices"][0]["message"]["content"], "완전한 1차 답변")
+        self.assertEqual(len(opener.requests), 1)
+
+    def test_generic_adjective_before_side_effect_is_not_treated_as_drug_name(self):
+        messages = [
+            {
+                "role": "user",
+                "content": "예상되는 부작용과 증상 변화에 따른 대처 방법을 설명해주세요.",
+            }
+        ]
+
+        self.assertIsNone(main._select_mcp_route(messages))
+
     def test_l2_failure_raises_retryable_error_without_internal_retry(self):
         failures = [
             URLError(TimeoutError("stalled")),
