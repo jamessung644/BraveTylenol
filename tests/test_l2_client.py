@@ -183,7 +183,8 @@ async def test_complete_recovers_blank_direct_completion_once(monkeypatch):
     assert "final user-facing answer" in requests[1]["messages"][-1]["content"]
 
 
-async def test_blank_recovery_never_expands_the_fast_request_budget(monkeypatch):
+@pytest.mark.parametrize("max_tokens", [768, 1280])
+async def test_blank_recovery_never_expands_the_fast_request_budget(monkeypatch, max_tokens):
     settings = settings_with_key(monkeypatch)
     requests = []
 
@@ -199,11 +200,11 @@ async def test_blank_recovery_never_expands_the_fast_request_budget(monkeypatch)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
         result = await L2Client(settings, http_client=http_client).complete(
             messages=[{"role": "user", "content": "질문"}],
-            max_tokens=1024,
+            max_tokens=max_tokens,
         )
 
     assert result.content == "최종"
-    assert requests[1]["max_tokens"] == 1024
+    assert requests[1]["max_tokens"] == max_tokens
 
 
 async def test_complete_rejects_blank_after_one_recovery(monkeypatch):

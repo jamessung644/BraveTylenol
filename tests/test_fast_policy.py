@@ -38,6 +38,7 @@ def test_long_clinical_context_keeps_room_for_a_complete_answer():
 
     assert profile.kind == "complex"
     assert profile.max_tokens == 1280
+    assert "at most 180 words" in profile.system_prompt
 
 
 def test_korean_emergency_language_is_detected():
