@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from jsonschema import SchemaError, validators
+from jsonschema import validators
 from pydantic import BaseModel, Field, ValidationError
 
 from lunit_hackathon.config import Settings
@@ -232,6 +232,8 @@ class RetrievalEngine:
                     )
                     usable_in_wave = False
                     for (tool_call, _), outcome in zip(valid_calls, outcomes, strict=True):
+                        if isinstance(outcome, asyncio.CancelledError):
+                            raise outcome
                         if isinstance(outcome, BaseException):
                             messages.append(_tool_error(tool_call, "MCP tool call failed"))
                             continue
@@ -436,14 +438,56 @@ def _parse_arguments(raw: str) -> tuple[dict[str, Any], str | None]:
 
 def _validate_schema(schema: dict[str, Any]) -> None:
     try:
-        validators.validator_for(schema).check_schema(schema)
-    except SchemaError as error:
+        validator = validators.validator_for(schema)
+        validator.check_schema(schema)
+        _validate_schema_references(schema)
+        validator(schema)
+    except Exception as error:
         raise RetrievalError("MCP tool schema is invalid", code="mcp_schema_invalid") from error
 
 
 def _arguments_match_schema(arguments: dict[str, Any], schema: dict[str, Any]) -> bool:
-    validator = validators.validator_for(schema)(schema)
-    return not any(validator.iter_errors(arguments))
+    try:
+        validator = validators.validator_for(schema)(schema)
+        return not any(validator.iter_errors(arguments))
+    except Exception as error:
+        raise RetrievalError("MCP tool schema is invalid", code="mcp_schema_invalid") from error
+
+
+def _validate_schema_references(schema: Mapping[str, Any]) -> None:
+    """Reject unsupported external and unresolved local JSON Schema references."""
+
+    def validate_reference(reference: Any) -> None:
+        if not isinstance(reference, str) or not reference.startswith("#"):
+            raise ValueError("external JSON Schema references are not supported")
+        if reference == "#":
+            return
+        if not reference.startswith("#/"):
+            raise ValueError("JSON Schema reference is not a supported JSON Pointer")
+
+        target: Any = schema
+        for raw_token in reference[2:].split("/"):
+            token = raw_token.replace("~1", "/").replace("~0", "~")
+            if isinstance(target, Mapping) and token in target:
+                target = target[token]
+                continue
+            if isinstance(target, list) and token.isdecimal() and int(token) < len(target):
+                target = target[int(token)]
+                continue
+            raise ValueError("JSON Schema reference does not resolve")
+
+    def visit(value: Any) -> None:
+        if isinstance(value, Mapping):
+            for keyword in ("$ref", "$dynamicRef", "$recursiveRef"):
+                if keyword in value:
+                    validate_reference(value[keyword])
+            for nested_value in value.values():
+                visit(nested_value)
+        elif isinstance(value, list):
+            for nested_value in value:
+                visit(nested_value)
+
+    visit(schema)
 
 
 def _call_signature(name: str, arguments: dict[str, Any]) -> str:

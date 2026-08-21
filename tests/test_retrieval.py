@@ -198,6 +198,23 @@ async def test_total_failed_wave_raises_and_never_returns_tool_error_as_evidence
     assert caught.value.code == "mcp_all_calls_failed"
 
 
+async def test_mcp_call_cancellation_propagates_without_becoming_retrieval_failure(monkeypatch):
+    class CancellingMCP(FakeMCP):
+        async def call_tool(self, name: str, arguments: dict) -> MCPCallResult:
+            self.calls.append((name, arguments))
+            raise asyncio.CancelledError
+
+    l2 = ScriptedL2([L2Completion(tool_calls=[call("cancel", "lookup", {"query": "a"})])])
+    mcp = CancellingMCP([tool()], {})
+
+    with pytest.raises(asyncio.CancelledError):
+        await RetrievalEngine(l2, mcp, settings(monkeypatch)).retrieve(
+            "query", route("lookup"), deadline()
+        )
+
+    assert mcp.calls == [("lookup", {"query": "a"})]
+
+
 async def test_two_execution_waves_overlap_and_finalization_is_third_turn(monkeypatch):
     wave_one_ready = asyncio.Event()
     wave_two_ready = asyncio.Event()
@@ -442,3 +459,24 @@ async def test_invalid_discovered_schema_keeps_typed_code(monkeypatch):
         await engine.retrieve("query", route("lookup"), deadline())
 
     assert caught.value.code == "mcp_schema_invalid"
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"$ref": "#/$defs/missing"},
+        {"$ref": "https://example.invalid/unsupported-schema"},
+    ],
+)
+async def test_unresolved_schema_reference_is_rejected_before_mcp_execution(monkeypatch, schema):
+    l2 = ScriptedL2([L2Completion(tool_calls=[call("lookup", "lookup", {"query": "a"})])])
+    mcp = FakeMCP([MCPTool(name="lookup", input_schema=schema)], {})
+
+    with pytest.raises(RetrievalError) as caught:
+        await RetrievalEngine(l2, mcp, settings(monkeypatch)).retrieve(
+            "query", route("lookup"), deadline()
+        )
+
+    assert caught.value.code == "mcp_schema_invalid"
+    assert l2.calls == []
+    assert mcp.calls == []
