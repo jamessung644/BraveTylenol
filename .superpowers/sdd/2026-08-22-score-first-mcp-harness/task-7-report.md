@@ -98,3 +98,21 @@ TDD and verification evidence:
   Image inspection confirmed `65532:65532` and `uvicorn app:app --host 0.0.0.0 --port 8000`.
   No live L2 smoke run was repeated because this fix changes only build-context filtering and
   smoke-client supervision, not the application runtime behavior.
+
+## Fix Round 2 — bounded process supervision
+
+Fix commit: `876cdea15c825675b15a3720c561af100b44cb00`
+
+- The smoke CLI now accepts only 1–256 requests, 1–32 concurrency, and a positive deadline no
+  greater than 165 seconds. Invalid values produce the same aggregate-only, nonzero failure before
+  creating a request list, process, or worker pool; effective workers are capped at the request
+  count, preserving the normal 16x16 gate.
+- Child supervision records a successful `Process.start()` before it calls `is_alive`, `terminate`,
+  `kill`, or `join`. Pipe, startup, and cleanup resource errors normalize to status `0`, including
+  health/models preflight, without exposing exception details.
+- RED: the new focused tests had 3 failures: unstarted-process cleanup raised, oversized CLI input
+  invoked argparse stderr, and effective worker capping did not exist.
+- GREEN: focused smoke/container tests reported `15 passed in 1.49s`. Final verification:
+  `python3 -m pytest` reported `218 passed in 2.99s`, `python3 -m ruff check .` passed, and
+  `git diff --check` was clean.
+- Dockerfile and `.dockerignore` were unchanged in this round, so a Docker rebuild was not needed.
