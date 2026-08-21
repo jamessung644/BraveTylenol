@@ -91,3 +91,28 @@ not part of the credential-free deterministic suite:
 For a credential-free runtime smoke check, start the container without the
 key: `/v1/models` must return 200, while a chat request without Bearer auth
 must return 503.
+
+### One-command evaluator-style verifier
+
+The verifier builds and starts the image **without** placing the credential in
+the container. It then behaves like the evaluator: the key is sent only as the
+request Bearer token. It checks model discovery, unauthenticated rejection, a
+real single-turn L2 completion, and a real multi-turn completion. Response text
+and the credential are never printed.
+
+```bash
+read -rs LUNIT_FM_API_KEY
+export LUNIT_FM_API_KEY
+.venv/bin/python scripts/verify_submission.py
+unset LUNIT_FM_API_KEY
+```
+
+Use another local port if 8000 is occupied, or reuse an existing image:
+
+```bash
+.venv/bin/python scripts/verify_submission.py --port 8123
+.venv/bin/python scripts/verify_submission.py --skip-build --image brave-tylenol:verify
+```
+
+This is a submission-runtime smoke verifier, not a replacement for the
+dashboard's full CoEval/HealthBench score.
