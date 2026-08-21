@@ -175,7 +175,7 @@ class BoundedL2GatewayTest(unittest.TestCase):
         self.assertEqual(outbound.get_header("Authorization"), "Bearer lunit_request_test")
         body = json.loads(outbound.data)
         self.assertEqual(body["model"], "Lunit/L2-preview")
-        self.assertEqual(body["max_tokens"], 6_144)
+        self.assertEqual(body["max_tokens"], 4_096)
         self.assertEqual(body["messages"][-1]["content"], "혈압이 높으면 어떻게 해야 하나요?")
 
     def test_l2_failure_raises_retryable_error_without_internal_retry(self):
