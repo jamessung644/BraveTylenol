@@ -57,6 +57,54 @@ class BoundedL2FallbackTest(unittest.TestCase):
     def test_exposes_one_call_l2_fallback_boundary(self):
         self.assertTrue(callable(getattr(main, "request_l2_or_fallback", None)))
 
+    def test_medical_prompt_covers_context_triage_and_safe_management(self):
+        required_phrases = (
+            "sole author",
+            "acute problem",
+            "chronic condition",
+            "child",
+            "older or frail adult",
+            "pregnant or breastfeeding",
+            "Emergency now",
+            "Urgent same-day care",
+            "Routine outpatient care",
+            "Self-care with monitoring",
+            "do not over-triage",
+            "one recommended care level",
+            "exact emergency medication doses",
+            "same tests, imaging, treatment, or admission",
+            "medication safety",
+        )
+
+        for phrase in required_phrases:
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, main.MEDICAL_SYSTEM_PROMPT)
+
+    def test_full_multiturn_history_follows_medical_system_prompt(self):
+        opener = RecordingOpener(
+            FakeResponse({"choices": [{"message": {"content": "follow-up L2 answer"}}]})
+        )
+        history = [
+            {"role": "system", "content": "Evaluator context"},
+            {"role": "user", "content": "First question"},
+            {"role": "assistant", "content": "First answer"},
+            {"role": "user", "content": "What should I do now?"},
+        ]
+
+        main.request_l2_or_fallback(
+            {"messages": history},
+            "Bearer lunit_test_key",
+            opener=opener,
+            environ={},
+        )
+
+        body = json.loads(opener.requests[0].data)
+        self.assertEqual(
+            body["messages"][0],
+            {"role": "system", "content": main.MEDICAL_SYSTEM_PROMPT},
+        )
+        self.assertEqual(body["messages"][1:], history)
+
     def test_returns_l2_text_from_one_bounded_request(self):
         opener = RecordingOpener(
             FakeResponse(
@@ -168,7 +216,7 @@ class BoundedL2FallbackTest(unittest.TestCase):
         self.assertEqual(result["choices"][0]["message"]["content"], "L2 답변")
         self.assertEqual(
             opener.requests[0].get_header("Authorization"),
-            "Bearer ffffffff",
+            f"Bearer {main.EMBEDDED_LUNIT_API_KEY}",
         )
 
     def test_malformed_environment_keys_use_embedded_placeholder(self):
@@ -192,7 +240,7 @@ class BoundedL2FallbackTest(unittest.TestCase):
                 self.assertEqual(result["choices"][0]["message"]["content"], "L2 답변")
                 self.assertEqual(
                     opener.requests[0].get_header("Authorization"),
-                    "Bearer ffffffff",
+                    f"Bearer {main.EMBEDDED_LUNIT_API_KEY}",
                 )
 
     def test_extended_coeval_shape_preserves_messages_and_smaller_token_budget(self):
