@@ -28,8 +28,9 @@ retrieval은 6건 중 4건만 HTTP 200이었고 두 건은 502였으며, direct 
 
 ## Release 결정
 
-- `AGENT_MODE=direct`를 제출 기본값으로 유지한다.
-- `hybrid`와 `rag`는 명시적 opt-in 진단·실험 경로로만 보존한다.
+- 이 실험의 promotion 판정은 NO-GO로 유지한다. 다만 이후 명시적인 제출 지시에 따라
+  `AGENT_MODE=hybrid`를 runtime 기본값으로 선택한다.
+- `direct`는 MCP를 즉시 끄는 비교·복구 경로로 보존한다.
 - `MAX_MCP_CALLS` 기본값은 1이다. 2~3 hop source graph는 별도 설정과 후속 검증 없이는
   기본 release로 승격하지 않는다.
 - 문항별 문자열이나 예상답을 runtime routing에 넣지 않는다.

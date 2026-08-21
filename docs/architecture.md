@@ -43,7 +43,7 @@ POST /v1/chat/completions
 HTTP/JSON boundary 검증 -- 실패 --> 4xx
         |
         v
-mode selection (default direct; hybrid/rag opt-in)
+mode selection (default hybrid; direct opt-out)
         |
         +-- direct 또는 일반/응급/저위험·안정 정보 --> direct Generation L2 1회 --> L2 text
         |
@@ -82,10 +82,10 @@ mode selection (default direct; hybrid/rag opt-in)
                                   plain L2 text
 ~~~
 
-기본값은 `AGENT_MODE=direct`다. 따라서 환경 변수가 없는 제출 Docker는 Retrieval과 MCP
-endpoint를 사용하지 않고 한 번의 medically prompted final L2 call을 수행한다. `hybrid`는
-source-dependent 질문만 Retrieval로 보내는 opt-in variant이고, `rag`는 정상 질문 전체를
-Generation tool trajectory에 넣는 진단 variant다. `passthrough`도 검색 조정만
+기본값은 `AGENT_MODE=hybrid`다. 일반 질문은 direct final fast path로 유지하고,
+source-dependent 질문만 Retrieval로 보낸다. `direct`는 MCP를 완전히 끄는 비교·복구
+variant이고, `rag`는 정상 질문 전체를 Generation tool trajectory에 넣는 진단 variant다.
+`passthrough`도 검색 조정만
 건너뛰며 direct final prompt와 동일한 plain-answer validator/recovery를 통과한다.
 
 응급 표현은 application 기능이나 내부 route 출력 형식을 포함하지 않는 독립 emergency final
@@ -160,7 +160,8 @@ result에서 관찰된 `cite_uid`, score 범위, 중복, item 수를 검증한�
 `AGENT_MODE=hybrid`만 켜면 안전한 기본 `MAX_MCP_CALLS=1`이 유지된다. MFDS 2-hop이나
 guideline·research·법령 3-hop을 실험하려면 `MAX_MCP_CALLS=2|3`도 명시해야 하며, 이 값은
 artifact ceiling과 도메인 ceiling을 넘지 못한다. 현재 paired live 결과는 기본 hybrid 승격을
-지지하지 않아 제출 기본값은 direct로 유지한다.
+지지하지 않았지만, 최종 제출 지시에 따라 hybrid를 기본값으로 선택한다. `MAX_MCP_CALLS=1`과
+direct fast path를 유지하고 `AGENT_MODE=direct`로 즉시 비활성화할 수 있다.
 
 ## 시간 예산과 MCP stall 격리
 

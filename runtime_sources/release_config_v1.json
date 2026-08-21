@@ -1,7 +1,7 @@
 {
-  "artifact_revision": "2026-08-22-dashboard-v1-natural-language-v1-direct-default-mcp3",
+  "artifact_revision": "2026-08-22-dashboard-v1-natural-language-v1-hybrid-default-mcp3",
   "dashboard_verified_date": "2026-08-21",
-  "default_agent_mode": "direct",
+  "default_agent_mode": "hybrid",
   "finalizer_contract": "dashboard_v1",
   "legal_policy_file": "legal_policy_ko_v1.json",
   "max_retrieval_calls": 3,

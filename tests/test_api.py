@@ -355,7 +355,7 @@ async def test_chat_preserves_multi_turn_history_after_direct_system_prompt(monk
     assert envelope["latest_user_message"]["content"] == history[-1]["content"]
 
 
-async def test_default_container_mode_answers_official_label_question_without_mcp(monkeypatch):
+async def test_default_hybrid_mode_requires_mcp_for_official_label_question(monkeypatch):
     monkeypatch.delenv("AGENT_MODE", raising=False)
     monkeypatch.delenv("HARNESS_MODE", raising=False)
     monkeypatch.setenv("LUNIT_MCP_URL", "")
@@ -373,7 +373,7 @@ async def test_default_container_mode_answers_official_label_question_without_mc
 
     def forbidden_mcp(*args, **kwargs):
         del args, kwargs
-        raise AssertionError("direct default must not construct an MCP client")
+        raise AssertionError("missing MCP configuration must fail before construction")
 
     monkeypatch.setattr(app_module, "L2Client", RecordingL2)
     monkeypatch.setattr(app_module, "MCPClient", forbidden_mcp)
@@ -392,13 +392,8 @@ async def test_default_container_mode_answers_official_label_question_without_mc
             },
         )
 
-    assert response.status_code == 200
-    assert response.json()["choices"][0]["message"]["content"] == (
-        "공식 라벨 질문에 대한 L2 답변"
-    )
-    assert len(RecordingL2.calls) == 1
-    envelope = json.loads(RecordingL2.calls[0]["messages"][-1]["content"])
-    assert envelope["final_phase_context"]["phase"] == "direct"
+    assert response.status_code == 503
+    assert RecordingL2.calls == []
 
 
 @pytest.mark.parametrize(

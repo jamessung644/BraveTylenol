@@ -380,8 +380,8 @@ def compile_bundle(source_root: Path, runtime_sources: Path) -> dict[str, Any]:
         raise CompileError("unsupported runtime source config schema")
     if config.get("finalizer_contract") != "dashboard_v1":
         raise CompileError("unsupported Retrieval finalizer contract")
-    if config.get("default_agent_mode") != "direct":
-        raise CompileError("submission runtime must default to direct mode")
+    if config.get("default_agent_mode") != "hybrid":
+        raise CompileError("submission runtime must default to hybrid mode")
     if config.get("mcp_transport") != "streamable_http":
         raise CompileError("unsupported MCP transport")
     if config.get("model") != OFFICIAL_MODEL:
