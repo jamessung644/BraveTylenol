@@ -6,6 +6,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 from urllib.error import URLError
 
 import main
@@ -39,6 +40,17 @@ class RecordingOpener:
         if isinstance(self.response, BaseException):
             raise self.response
         return self.response
+
+
+class SlowTrickleResponse:
+    def __init__(self):
+        self.reads = 0
+
+    def read1(self, limit):
+        del limit
+        time.sleep(0.02)
+        self.reads += 1
+        return b"x"
 
 
 class BoundedL2FallbackTest(unittest.TestCase):
@@ -143,7 +155,7 @@ class BoundedL2FallbackTest(unittest.TestCase):
             "Bearer lunit_request_test",
         )
 
-    def test_non_lunit_bearer_without_environment_uses_embedded_key(self):
+    def test_non_lunit_bearer_without_environment_uses_baseline(self):
         opener = RecordingOpener(FakeResponse({"choices": [{"message": {"content": "L2 답변"}}]}))
 
         result = main.request_l2_or_fallback(
@@ -153,13 +165,13 @@ class BoundedL2FallbackTest(unittest.TestCase):
             environ={},
         )
 
-        self.assertEqual(result["choices"][0]["message"]["content"], "L2 답변")
         self.assertEqual(
-            opener.requests[0].get_header("Authorization"),
-            f"Bearer {main.EMBEDDED_LUNIT_API_KEY}",
+            result["choices"][0]["message"]["content"],
+            main.KOREAN_BASELINE_RESPONSE,
         )
+        self.assertEqual(opener.requests, [])
 
-    def test_malformed_environment_keys_are_ignored_in_favor_of_embedded_key(self):
+    def test_malformed_environment_keys_are_ignored_without_sending_placeholder(self):
         malformed_keys = [
             "lunit_test\nsecond-line",
             "lunit_" + ("x" * 4_096),
@@ -177,11 +189,93 @@ class BoundedL2FallbackTest(unittest.TestCase):
                     environ={"LUNIT_FM_API_KEY": malformed_key},
                 )
 
-                self.assertEqual(result["choices"][0]["message"]["content"], "L2 답변")
                 self.assertEqual(
-                    opener.requests[0].get_header("Authorization"),
-                    f"Bearer {main.EMBEDDED_LUNIT_API_KEY}",
+                    result["choices"][0]["message"]["content"],
+                    main.KOREAN_BASELINE_RESPONSE,
                 )
+                self.assertEqual(opener.requests, [])
+
+    def test_extended_coeval_shape_preserves_messages_and_smaller_token_budget(self):
+        opener = RecordingOpener(
+            FakeResponse({"choices": [{"message": {"content": "확장 형식 답변"}}]})
+        )
+
+        result = main.request_l2_or_fallback(
+            {
+                "messages": [
+                    {"role": "developer", "content": "개발자 지침"},
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "사용자 질문"}],
+                    },
+                ],
+                "max_completion_tokens": 2_048,
+            },
+            "Bearer lunit_test-key",
+            opener=opener,
+            environ={},
+        )
+
+        self.assertEqual(result["choices"][0]["message"]["content"], "확장 형식 답변")
+        outbound = json.loads(opener.requests[0].data)
+        self.assertEqual(outbound["max_tokens"], 2_048)
+        self.assertEqual(
+            outbound["messages"][-2:],
+            [
+                {"role": "system", "content": "개발자 지침"},
+                {"role": "user", "content": "사용자 질문"},
+            ],
+        )
+
+    def test_thirty_two_calls_never_exceed_the_l2_concurrency_cap(self):
+        lock = threading.Lock()
+        active = 0
+        maximum = 0
+        response = json.dumps({"choices": [{"message": {"content": "동시성 제한 답변"}}]}).encode()
+
+        def fake_post_json(**kwargs):
+            nonlocal active, maximum
+            del kwargs
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+            time.sleep(0.02)
+            with lock:
+                active -= 1
+            return 200, response
+
+        def send(index):
+            return main.request_l2_or_fallback(
+                {"messages": [{"role": "user", "content": f"질문 {index}"}]},
+                "Bearer lunit_test-key",
+                environ={},
+            )
+
+        with patch.object(main, "_post_json", side_effect=fake_post_json):
+            with ThreadPoolExecutor(max_workers=32) as executor:
+                results = list(executor.map(send, range(32)))
+
+        self.assertEqual(maximum, main.MAX_CONCURRENT_L2_REQUESTS)
+        self.assertTrue(
+            all(
+                result["choices"][0]["message"]["content"] == "동시성 제한 답변"
+                for result in results
+            )
+        )
+
+    def test_response_body_trickle_cannot_bypass_the_total_deadline(self):
+        response = SlowTrickleResponse()
+        started = time.monotonic()
+
+        with self.assertRaises(TimeoutError):
+            main._read_bounded_response(response, time.monotonic() + 0.05)
+
+        self.assertLess(time.monotonic() - started, 0.15)
+        self.assertLess(response.reads, 10)
+
+    def test_sigterm_requests_clean_process_exit(self):
+        with self.assertRaises(KeyboardInterrupt):
+            main._handle_termination_signal(15, None)
 
     def test_server_supports_injected_completion_provider(self):
         self.assertIn("completion_provider", inspect.signature(create_server).parameters)
