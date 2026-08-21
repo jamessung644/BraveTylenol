@@ -1,8 +1,9 @@
 # BraveTylenol bounded-L2 submission
 
 CoEval의 OpenAI-compatible 요청을 받아 `Lunit/L2-preview`가 최종 답변을 생성하는
-해커톤 제출 서버입니다. 정적 의료 답변이나 외부 인터넷 API를 사용하지 않으며,
-L2 생성이 실패하면 CoEval이 재시도할 수 있도록 명시적인 오류를 반환합니다.
+해커톤 제출 서버입니다. 정적 의료 답변이나 외부 인터넷 API를 사용하지 않고,
+평가에서 허용된 공식 Lunit MCP만 선택적으로 사용합니다. L2 생성이 실패하면
+CoEval이 재시도할 수 있도록 명시적인 오류를 반환합니다.
 
 ## 평가 환경 계약
 
@@ -14,6 +15,10 @@ L2 생성이 실패하면 CoEval이 재시도할 수 있도록 명시적인 오�
 - `lunit_...` 형식의 `LUNIT_FM_API_KEY`가 유효한 요청 Bearer보다 우선
 - L2 호출은 요청당 1회이며 서버 내부 재시도 없음
 - upstream timeout 145초, 요청 전체 deadline 150초, queue wait 최대 5초
+- KCD·식약처·심평원·DailyMed·명시적 PubMed 근거 질문만 공식 MCP 사용
+- MCP는 요청당 최대 1회, timeout 5초, 동시 실행 4개, queue wait 0.15초
+- MCP timeout·오류·빈 결과는 재시도 없이 기존 L2 단일 호출로 전환
+- MCP 결과는 최대 3개·5,000자로 제한하고 식별정보 가능성이 있으면 검색하지 않음
 - completion budget 최대 6,144 token, `reasoning_effort=low`, `temperature=0`
 - L2 outbound 동시 실행은 공식 CoEval 동시성과 같은 16개로 제한
 - 응답 본문은 4MB로 제한하며 slow body도 전체 deadline을 넘길 수 없음
@@ -31,6 +36,8 @@ L2 생성이 실패하면 CoEval이 재시도할 수 있도록 명시적인 오�
 - 응급/당일/외래/자가관리 단계와 특수집단 위험을 문맥에 맞게 적용
 - 정확한 항목 수, heading, schema, 길이와 제공 사실만 사용하라는 지시를 재확인
 - 약 이름·제형·현재 계획이 없을 때 새 용량이나 복용 시점을 임의로 생성하지 않음
+- 공식 코드·허가·약가·문헌 질문은 MCP의 citable 근거를 L2 문맥에만 제공
+- MCP 사용 여부와 무관하게 사용자에게 보이는 최종 문장 전체는 L2가 생성
 - 최종 사용자 답변은 항상 L2가 작성
 
 ## 실행
