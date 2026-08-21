@@ -252,3 +252,93 @@ def test_effective_workers_preserve_required_16x16_gate():
 
     assert smoke.effective_workers(requests=16, concurrency=16) == 16
     assert smoke.effective_workers(requests=3, concurrency=16) == 3
+
+
+def test_executor_construction_and_submit_failures_return_only_failed_results(monkeypatch):
+    """Thread/process resource exhaustion must not escape before aggregate accounting begins."""
+    smoke = _load_smoke_module()
+
+    def construction_failure(*args, **kwargs):
+        raise OSError("resource exhausted")
+
+    monkeypatch.setattr(smoke, "ThreadPoolExecutor", construction_failure)
+    failed = smoke.run_completions("http://127.0.0.1:1", 2, 2, 0.1)
+    assert [result.status for result in failed] == [0, 0]
+    assert not any(result.success for result in failed)
+
+    class Executor:
+        def __init__(self, *args, **kwargs):
+            self.shutdown_calls = []
+
+        def submit(self, *args, **kwargs):
+            raise RuntimeError("no workers")
+
+        def shutdown(self, **kwargs):
+            self.shutdown_calls.append(kwargs)
+
+    monkeypatch.setattr(smoke, "ThreadPoolExecutor", Executor)
+    failed = smoke.run_completions("http://127.0.0.1:1", 2, 2, 0.1)
+    assert [result.status for result in failed] == [0, 0]
+    assert not any(result.success for result in failed)
+
+
+def test_cleanup_faults_force_status_zero_and_attempt_each_safe_step(monkeypatch):
+    """A failed cleanup after a received 200 must not be reported as a successful response."""
+    smoke = _load_smoke_module()
+    calls = []
+
+    class Connection:
+        def close(self):
+            return None
+
+        def poll(self, timeout):
+            return True
+
+        def recv(self):
+            return 200, {"ok": True}
+
+    class Process:
+        def start(self):
+            calls.append("start")
+
+        def is_alive(self):
+            calls.append("is_alive")
+            raise OSError("state unavailable")
+
+        def terminate(self):
+            calls.append("terminate")
+            raise OSError("terminate unavailable")
+
+        def join(self, timeout):
+            calls.append("join")
+            raise OSError("join unavailable")
+
+        def kill(self):
+            calls.append("kill")
+            raise OSError("kill unavailable")
+
+    class Context:
+        def Pipe(self, duplex):
+            return Connection(), Connection()
+
+        def Process(self, **kwargs):
+            return Process()
+
+    monkeypatch.setattr(smoke.multiprocessing, "get_context", lambda _: Context())
+
+    assert smoke._read_json("http://example.test", "/", None, "GET", 0.1) == (0, None)
+    assert {"start", "is_alive", "terminate", "join", "kill"} <= set(calls)
+
+
+def test_worker_pipe_close_failure_is_suppressed_without_false_success():
+    """A child-side pipe close error must not print a traceback or become an unhandled success."""
+    smoke = _load_smoke_module()
+
+    class Connection:
+        def send(self, value):
+            raise OSError("send unavailable")
+
+        def close(self):
+            raise OSError("close unavailable")
+
+    smoke._read_json_worker(Connection(), "", "/", None, "GET", 0.1)
