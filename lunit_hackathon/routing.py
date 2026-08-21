@@ -1,3 +1,4 @@
+import re
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 
@@ -14,6 +15,9 @@ DOMAIN_KEYWORDS: Mapping[MedicalDomain, tuple[str, ...]] = MappingProxyType(
             "용량",
             "금기",
             "처방",
+            "aspirin",
+            "ibuprofen",
+            "paracetamol",
             "drug",
             "medication",
         ),
@@ -28,7 +32,6 @@ DOMAIN_KEYWORDS: Mapping[MedicalDomain, tuple[str, ...]] = MappingProxyType(
         ),
         MedicalDomain.REIMBURSEMENT: (
             "건강보험",
-            "급여",
             "비급여",
             "수가",
             "약가",
@@ -43,7 +46,6 @@ DOMAIN_KEYWORDS: Mapping[MedicalDomain, tuple[str, ...]] = MappingProxyType(
             "질병분류",
             "상병",
             "청구",
-            "code",
         ),
         MedicalDomain.LAW: (
             "의료법",
@@ -53,7 +55,6 @@ DOMAIN_KEYWORDS: Mapping[MedicalDomain, tuple[str, ...]] = MappingProxyType(
             "조항",
             "규제",
             "regulation",
-            "legal",
         ),
         MedicalDomain.GUIDELINE: (
             "가이드라인",
@@ -82,6 +83,10 @@ DOMAIN_KEYWORDS: Mapping[MedicalDomain, tuple[str, ...]] = MappingProxyType(
             "자살",
             "경련",
             "심정지",
+            "overdose",
+            "shortness of breath",
+            "difficulty breathing",
+            "trouble breathing",
             "emergency",
         ),
         MedicalDomain.VULNERABLE_POPULATION: (
@@ -143,6 +148,11 @@ _VERIFICATION_DOMAINS = frozenset(
         MedicalDomain.VULNERABLE_POPULATION,
     }
 )
+_MEDICAL_CODING_PATTERN = re.compile(r"\b(?:medical|diagnosis|billing)\s+code(?:s)?\b")
+_LEGAL_WORD_PATTERN = re.compile(r"\blegal\b")
+_KOREAN_MEDICAL_BENEFIT_PATTERN = re.compile(
+    r"(?:건강|의료|약|치료|보험)\s*급여|급여\s*(?:대상|기준|여부|인정)"
+)
 
 
 def route_messages(messages: Sequence[ChatMessage]) -> RouteDecision:
@@ -151,7 +161,7 @@ def route_messages(messages: Sequence[ChatMessage]) -> RouteDecision:
     domains = frozenset(
         domain
         for domain, keywords in DOMAIN_KEYWORDS.items()
-        if any(keyword.casefold() in query for keyword in keywords)
+        if _matches_domain(domain, keywords, query)
     )
     if not domains & _EVIDENCE_DOMAINS:
         domains = domains | frozenset({MedicalDomain.GENERAL_HEALTH})
@@ -184,6 +194,7 @@ def self_contained_query(
         (index for index in range(len(selected) - 1, -1, -1) if selected[index][0] == "user"),
         None,
     )
+    latest_user = selected[latest_user_index] if latest_user_index is not None else None
     entries = [f"{role}: {content}" for role, content in selected]
 
     while len("\n".join(entries)) > maximum_chars and len(entries) > 1:
@@ -199,14 +210,25 @@ def self_contained_query(
     if len(query) <= maximum_chars:
         return query
 
-    role, content = selected[-1]
+    role, content = latest_user or selected[-1]
     prefix = f"{role}: "
-    if latest_user_index is not None:
-        role, content = selected[latest_user_index]
-        prefix = f"{role}: "
     if maximum_chars <= len(prefix):
         return prefix[:maximum_chars]
     return prefix + content[-(maximum_chars - len(prefix)) :]
+
+
+def _matches_domain(
+    domain: MedicalDomain, keywords: tuple[str, ...], query: str
+) -> bool:
+    if any(keyword.casefold() in query for keyword in keywords):
+        return True
+    if domain is MedicalDomain.CODING:
+        return _MEDICAL_CODING_PATTERN.search(query) is not None
+    if domain is MedicalDomain.LAW:
+        return _LEGAL_WORD_PATTERN.search(query) is not None
+    if domain is MedicalDomain.REIMBURSEMENT:
+        return _KOREAN_MEDICAL_BENEFIT_PATTERN.search(query) is not None
+    return False
 
 
 def _tools_for(domains: frozenset[MedicalDomain]) -> tuple[str, ...]:

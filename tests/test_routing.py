@@ -68,6 +68,44 @@ def test_route_messages_never_falls_back_to_unrelated_tools():
     assert "openapi_hira_disease_check_code" not in route.tool_names
 
 
+@pytest.mark.parametrize(
+    ("question", "expected_domains"),
+    [
+        ("I took an aspirin overdose", {MedicalDomain.DRUG, MedicalDomain.EMERGENCY}),
+        ("I have shortness of breath", {MedicalDomain.EMERGENCY}),
+        ("I have difficulty breathing", {MedicalDomain.EMERGENCY}),
+    ],
+)
+def test_route_messages_verifies_english_high_risk_questions(question, expected_domains):
+    route = route_messages([ChatMessage(role="user", content=question)])
+
+    assert expected_domains <= route.domains
+    assert route.verification_required is True
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Can you review this code?",
+        "The word illegal appears in this sentence.",
+        "이번 달 급여가 올랐어요.",
+    ],
+)
+def test_route_messages_avoids_ambiguous_non_medical_terms(question):
+    route = route_messages([ChatMessage(role="user", content=question)])
+
+    assert route.domains == frozenset({MedicalDomain.GENERAL_HEALTH})
+    assert route.verification_required is False
+
+
+def test_route_messages_preserves_unambiguous_medical_law_routing():
+    route = route_messages([ChatMessage(role="user", content="의료법 시행령 제3조를 알려주세요.")])
+
+    assert MedicalDomain.LAW in route.domains
+    assert "openapi_law_search" in route.tool_names
+    assert route.verification_required is True
+
+
 def test_self_contained_query_keeps_prior_subject_before_pronoun_follow_up():
     messages = [
         ChatMessage(role="user", content="아세트아미노펜의 간독성 위험을 설명해 주세요."),
@@ -93,4 +131,19 @@ def test_self_contained_query_truncates_oldest_context_before_latest_user_messag
 
     assert len(query) <= 80
     assert query.endswith("최신 질문은 이 약의 금기인가요?")
+    assert "a" not in query
+
+
+def test_self_contained_query_truncates_the_actual_latest_user_after_context_removal():
+    messages = [
+        ChatMessage(role="user", content="old user " + "a" * 80),
+        ChatMessage(role="assistant", content="old assistant " + "b" * 80),
+        ChatMessage(role="user", content="latest user " + "z" * 80),
+    ]
+
+    query = self_contained_query(messages, maximum_chars=30)
+
+    assert len(query) == 30
+    assert query.startswith("user: ")
+    assert "z" * 10 in query
     assert "a" not in query
