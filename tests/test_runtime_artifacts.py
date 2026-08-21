@@ -121,11 +121,11 @@ def test_loader_rejects_hash_consistent_retired_control_in_final_prompt(tmp_path
     [
         (
             "당신은 일반 국민과 의료인의 건강 질문을 지원하는 의료정보 "
-            "어시스턴트다. 이 요청에 대해 사용자에게 보여 줄 최종 자연어 답변만 작성한다."
+            "어시스턴트다. 이 요청에 대해 사용자에게 보여 줄 최종 답변만 작성한다."
         ),
         (
             "당신은 시간 민감한 건강 위험이 의심되는 사용자에게 보여 줄 "
-            "최종 자연어 답변을 작성한다."
+            "최종 답변을 작성한다."
         ),
     ],
 )
@@ -356,6 +356,50 @@ def test_final_phase_prompts_contain_no_application_protocol_names_or_syntax():
     ]
     assert len({entry["sha256"] for entry in manifest_phases.values()}) == len(
         manifest_phases
+    )
+
+
+def test_all_final_phase_prompts_share_healthbench_aligned_answer_policy():
+    final_templates = {
+        phase: prompt
+        for phase, prompt in GENERATION_PHASE_PROMPT_TEMPLATES.items()
+        if phase != "tool_decision"
+    }
+    required_contracts = (
+        "모든 명시적 질문과 서로 다른 대상·시점·과제를",
+        "확인하면 줄일 수 있는 불확실성",
+        "현재 정보로 없앨 수 없는 불확실성",
+        "답을 바꿀 중요한 불확실성이 없으면",
+        "조건부 행동을 먼저 제시한 뒤 가장 중요한 1~3개",
+        "현재 즉시 위험이 합리적으로 의심되면",
+        "비응급이면 무조건 응급실로 보내지 말고",
+        "답변 깊이는 과제와 위해도에 비례",
+        "사용자가 의료인이라고 명시",
+        "응답 언어를 위치·관할·의료 접근성으로 추정하지 않는다",
+        "JSON·표·SOAP·체크리스트",
+        "요청 형식에 맞춘 완결된 답변",
+    )
+
+    assert set(final_templates) == {
+        "direct_final",
+        "post_retrieval_final",
+        "mcp_failure_final",
+        "emergency_final",
+        "clean_recovery_final",
+    }
+    assert all(
+        all(contract in prompt for contract in required_contracts)
+        for prompt in final_templates.values()
+    )
+    assert all(
+        "형식을 지정하지 않았으면 읽기 쉬운 자연어" in prompt
+        for prompt in final_templates.values()
+    )
+    assert "전용 `근거` field 또는 section" in (
+        POST_RETRIEVAL_FINAL_SYSTEM_PROMPT_TEMPLATE
+    )
+    assert "전용 `근거` field 또는 section" in (
+        CLEAN_RECOVERY_FINAL_SYSTEM_PROMPT_TEMPLATE
     )
 
 

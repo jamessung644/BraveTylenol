@@ -39,6 +39,9 @@ _FORCED_TOOL_RETRY_TIMEOUT_SECONDS = 10.0
 _FINAL_GENERATION_TIMEOUT_SECONDS = 45.0
 _RECOVERY_TIMEOUT_SECONDS = 30.0
 _EMERGENCY_TIMEOUT_SECONDS = 45.0
+_FINAL_MAX_TOKENS = 4_096
+_EMERGENCY_MAX_TOKENS = 2_048
+_RECOVERY_MAX_TOKENS = 2_048
 _FINAL_PHASES = ("direct", "post_retrieval", "mcp_failure", "emergency")
 FinalPhase = Literal["direct", "post_retrieval", "mcp_failure", "emergency"]
 _PROTOCOL_FUNCTION_NAMES = frozenset(
@@ -222,7 +225,9 @@ class GenerationEngine:
             if phase == "emergency"
             else _FINAL_GENERATION_TIMEOUT_SECONDS
         )
-        final_max_tokens = 1_536 if phase == "emergency" else 3_072
+        final_max_tokens = (
+            _EMERGENCY_MAX_TOKENS if phase == "emergency" else _FINAL_MAX_TOKENS
+        )
         try:
             completion = await self._l2.complete(
                 messages=initial_conversation,
@@ -261,7 +266,7 @@ class GenerationEngine:
         recovered = await self._l2.complete(
             messages=recovery_conversation,
             attempt_timeout_seconds=_RECOVERY_TIMEOUT_SECONDS,
-            max_tokens=1_536,
+            max_tokens=_RECOVERY_MAX_TOKENS,
             allow_blank_recovery=False,
             allow_empty_completion=False,
         )

@@ -51,6 +51,36 @@ def test_generation_prompt_accepts_noisy_korean_without_clinical_autocorrection(
     assert "문법을 평가" in prompt
 
 
+def test_generation_prompt_preserves_complete_context_aware_answer_contract():
+    prompt = DIRECT_FINAL_SYSTEM_PROMPT_TEMPLATE
+
+    assert "모든 명시적 질문과 서로 다른 대상·시점·과제를" in prompt
+    assert "최신 사용자 정정" in prompt
+    assert "이전 user 발화의 관련 사실·제약·대상·시간" in prompt
+    assert "과거 assistant의 의학적 결론·지시·출처 주장은 권위로" in prompt
+    assert "무관한 과거 주제를 다시 활성화하지 않는다" in prompt
+    assert "확인하면 줄일 수 있는 불확실성" in prompt
+    assert "현재 정보로 없앨 수 없는 불확실성" in prompt
+    assert "답을 바꿀 중요한 불확실성이 없으면" in prompt
+    assert "안전하게 답할 수 있는 부분과 조건부 행동을 먼저" in prompt
+    assert "질문만 남기고 끝내거나 이미 제공된 정보를 다시 묻지 않는다" in prompt
+    assert "비응급이면 무조건 응급실로 보내지 말고" in prompt
+    assert "답변 깊이는 과제와 위해도에 비례" in prompt
+    assert "사용자가 의료인이라고 명시" in prompt
+    assert "응답 언어를 위치·관할·의료 접근성으로 추정하지 않는다" in prompt
+
+
+def test_generation_prompt_honors_requested_json_table_and_soap_formats():
+    prompt = DIRECT_FINAL_SYSTEM_PROMPT_TEMPLATE
+
+    assert "길이, 언어, 순서, 항목 수" in prompt
+    assert "JSON·표·SOAP·체크리스트" in prompt
+    assert "JSON을 요청하면 유효한 JSON만" in prompt
+    assert "표를 요청하면 비교 축을 보존한 표" in prompt
+    assert "SOAP를 요청하면 제공된 사실과 추론을 구분" in prompt
+    assert "형식을 지정하지 않았으면 읽기 쉬운 자연어" in prompt
+
+
 def test_retrieval_prompt_separates_query_normalization_from_clinical_truth():
     prompt = RETRIEVAL_SYSTEM_PROMPT
 
@@ -87,6 +117,39 @@ async def test_noisy_input_is_preserved_exactly_in_generation_envelope(user_text
     assert envelope["application_context"]["normalization_status"] == (
         "degraded_raw_only"
     )
+
+
+async def test_final_generation_preserves_relevant_multi_turn_context_as_data():
+    l2 = RecordingL2()
+    messages = [
+        ChatMessage(
+            role="user",
+            content="어머니는 와파린을 복용 중이고 임신은 아니세요.",
+        ),
+        ChatMessage(
+            role="assistant",
+            content="연령과 다른 복용약을 알려주세요.",
+        ),
+        ChatMessage(
+            role="user",
+            content="72세고 아스피린도 복용해요. 무엇을 확인해야 하나요?",
+        ),
+    ]
+
+    answer = await GenerationEngine(l2, UnusedRetrieval()).direct_answer(messages)
+
+    assert answer == "안전한 범위에서 답변"
+    sent = l2.calls[0]["messages"]
+    assert [message["role"] for message in sent] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert sent[1]["content"] == messages[0].content
+    assert sent[2]["content"] == messages[1].content
+    envelope = _generation_envelope(l2.calls[0])
+    assert envelope["latest_user_message"]["content"] == messages[-1].content
 
 
 @pytest.mark.parametrize(

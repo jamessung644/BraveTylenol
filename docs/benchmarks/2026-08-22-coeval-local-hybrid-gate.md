@@ -18,28 +18,25 @@ concurrency 16, two inference attempts, 2-second retry delay, `max_tokens=6144`,
 IDs and judge are held out: this project must not find, infer, inspect, or tune
 against them.
 
-At the pinned commit, the canonical `conquer_val.yaml` comment reports 3,337
-judge calls. That pinned file, rather than an unpinned secondary count, is the
-recorded authority for this experiment.
+At the pinned commit, `conquer_val.yaml` comments report approximately 3,337
+judge calls while the published `conquer_val_ids.json` metadata reports 3,410.
+The larger 3,410 value is the conservative cost basis; a real run must reconcile
+the final count from its rubric-grade artifacts.
 
 ### Predeclared anti-overfitting split
 
 No `conquer_val` prompt ID, wording, rubric, or expected answer may appear in
-runtime routing or prompt code. Before any scored run, the 301 official prompt
-IDs must be sorted by `SHA-256("coeval-741263-dev-v1:" + prompt_id)`; the first
-120 hashes form `dev120` and the remaining 181 form sealed `confirm181`. Only a
-secret-free manifest hash, counts, CoEval commit, and experiment generation may
-be recorded in this repository. Prompts, rubrics, answers, and per-item rules
-must not be copied into runtime artifacts.
+runtime routing or prompt code. The earlier v1 confirmation declaration is
+superseded: a historical three-item judge artifact touched one v1-confirmation
+item, and a prior baseline inference artifact covered all 301 public items.
+Consequently no public-val subset may be called a strict prompt holdout.
 
-`confirm181` has not been executed. It may be evaluated once after a candidate
-is frozen. Looking at that result and then editing the same candidate invalidates
-the confirmation; a new experiment generation and a different untouched public
-medical vector family are then required. HealthBench Main/Consensus outside the
-published `conquer_val` membership and all held-out test material are excluded
-from tuning. Adoption also requires the same direction on a second independent
-public medical vector family and a paired bootstrap interval/effect size; neither
-requirement has been measured in this local gate.
+The reproducible v2 prospective score-holdout generator, contamination limits,
+hashes, exact paired commands, and one-shot confirmation policy are specified in
+[CoEval public-val paired program v2](2026-08-22-coeval-paired-v2-program.md).
+HealthBench Main/Consensus outside published `conquer_val` and all held-out test
+material remain excluded from tuning. The organizer's held-out test is the only
+independent competition confirmation.
 
 This local gate does not execute CoEval and does not produce a HealthBench,
 leaderboard, or surrogate-judge score.
