@@ -1,9 +1,10 @@
+import asyncio
 import logging
 from collections.abc import Sequence
 from typing import Any, Literal
 
-from lunit_hackathon.errors import MalformedUpstreamResponseError, RetrievalError
-from lunit_hackathon.prompts import DIRECT_MEDICAL_GENERATION_SYSTEM_PROMPT
+from lunit_hackathon.errors import MalformedUpstreamResponseError
+from lunit_hackathon.generation import GenerationEngine, requires_retrieval
 from lunit_hackathon.schemas import ChatMessage, TokenUsage
 
 logger = logging.getLogger(__name__)
@@ -17,11 +18,13 @@ class ChatOrchestrator:
         *,
         l2_client: Any,
         generation_engine: Any | None,
-        mode: Literal["direct", "rag", "passthrough"],
+        mode: Literal["direct", "hybrid", "rag", "passthrough"],
+        rag_semaphore: asyncio.Semaphore | None = None,
     ) -> None:
         self._l2 = l2_client
         self._generation = generation_engine
         self._mode = mode
+        self._rag_semaphore = rag_semaphore
         self.last_usage = TokenUsage()
         self.last_finish_reason: str | None = None
 
@@ -35,33 +38,61 @@ class ChatOrchestrator:
         # retrieval-decision round trip in that case and ask L2 for the final,
         # medically prompted answer in exactly one upstream call.
         if self._mode == "direct":
-            answer = await self._generation.direct_answer(messages)
-            self.last_usage = getattr(self._l2, "last_usage", TokenUsage())
-            self.last_finish_reason = getattr(self._l2, "last_finish_reason", None)
-            return _required_content(answer)
+            return await self._direct(messages)
 
+        if self._mode == "hybrid":
+            if not requires_retrieval(messages):
+                return await self._direct(messages)
+
+        if self._rag_semaphore is None:
+            return await self._rag(messages)
         try:
-            answer = await self._generation.answer(messages)
-        except RetrievalError as error:
-            logger.warning(
-                "retrieval_fallback error_code=%s",
-                error.code,
-            )
-            answer = await self._generation.direct_answer(messages)
+            await asyncio.wait_for(self._rag_semaphore.acquire(), timeout=0.01)
+        except TimeoutError:
+            # Saturation must not queue into the final-answer reserve. Only a
+            # source-dependent request needs the explicit no-evidence final;
+            # forced-RAG traffic without source dependency can remain direct.
+            if requires_retrieval(messages):
+                logger.info("rag_admission_full route=evidence_unavailable")
+                return await self._evidence_unavailable(messages)
+            logger.info("rag_admission_full route=direct")
+            return await self._direct(messages)
+        try:
+            return await self._rag(messages)
+        finally:
+            self._rag_semaphore.release()
 
-        self.last_usage = getattr(self._l2, "last_usage", TokenUsage())
-        self.last_finish_reason = getattr(self._l2, "last_finish_reason", None)
+    async def _direct(self, messages: Sequence[ChatMessage]) -> str:
+        answer = await self._generation.direct_answer(messages)
+        self._update_usage()
         return _required_content(answer)
 
+    async def _rag(self, messages: Sequence[ChatMessage]) -> str:
+        # GenerationEngine maps Retrieval success or failure into a fresh,
+        # phase-specific no-tool final transcript and validates its plain answer.
+        answer = await self._generation.answer(messages)
+        self._update_usage()
+        return _required_content(answer)
+
+    async def _evidence_unavailable(self, messages: Sequence[ChatMessage]) -> str:
+        answer = await self._generation.evidence_unavailable_answer(messages)
+        self._update_usage()
+        return _required_content(answer)
+
+    def _update_usage(self) -> None:
+        self.last_usage = getattr(self._l2, "last_usage", TokenUsage())
+        self.last_finish_reason = getattr(self._l2, "last_finish_reason", None)
+
     async def _passthrough(self, messages: Sequence[ChatMessage]) -> str:
-        protected_messages = [
-            ChatMessage(role="system", content=DIRECT_MEDICAL_GENERATION_SYSTEM_PROMPT),
-            *messages,
-        ]
-        completion = await self._l2.complete(messages=protected_messages)
-        self.last_usage = getattr(self._l2, "last_usage", completion.usage)
-        self.last_finish_reason = completion.finish_reason
-        return _required_content(completion.content)
+        # Passthrough skips evidence coordination, but it may not bypass the
+        # final-answer prompt, validator, or single bounded recovery invariant.
+        generation = self._generation or GenerationEngine(
+            self._l2,
+            retrieval_engine=None,
+        )
+        answer = await generation.direct_answer(messages)
+        self._update_usage()
+        return _required_content(answer)
 
 
 def _required_content(content: str | None) -> str:
