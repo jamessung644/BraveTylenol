@@ -1,6 +1,9 @@
-"""Optional MCP SDK adapter isolated from the rest of the application."""
+"""Authenticated Streamable HTTP adapter for the organizer-provided MCP server."""
 
+import asyncio
 import json
+import logging
+import re
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any, Protocol
@@ -11,7 +14,10 @@ from mcp.client.streamable_http import streamable_http_client
 
 from lunit_hackathon.config import Settings
 from lunit_hackathon.errors import ConfigurationError, RetrievalError
+from lunit_hackathon.network_policy import require_official_mcp_endpoint
 from lunit_hackathon.schemas import MCPCallResult, MCPTool
+
+logger = logging.getLogger(__name__)
 
 
 class MCPConnectionProtocol(Protocol):
@@ -24,24 +30,85 @@ class MCPClientProtocol(Protocol):
     def connect(self) -> AbstractAsyncContextManager[MCPConnectionProtocol]: ...
 
 
+def _reject_nonfinite_json(value: str) -> None:
+    raise ValueError(f"non-finite JSON number: {value}")
+
+
 class SDKMCPConnection:
-    def __init__(self, client: Any, max_tool_result_chars: int) -> None:
+    def __init__(
+        self,
+        client: Any,
+        max_tool_result_chars: int,
+        semaphore: asyncio.Semaphore | None = None,
+    ) -> None:
         self._client = client
         self._max_tool_result_chars = max_tool_result_chars
+        self._semaphore = semaphore
 
     async def list_tools(self) -> list[MCPTool]:
         try:
-            result = await self._client.list_tools()
-            tools = [
-                MCPTool(
-                    name=tool.name,
-                    description=tool.description or "",
-                    input_schema=tool.input_schema or {"type": "object"},
+            async with _concurrency_slot(self._semaphore):
+                tools_by_name: dict[str, MCPTool] = {}
+                observed_names: set[str] = set()
+                duplicate_names: set[str] = set()
+                seen_cursors: set[str] = set()
+                observed_entries = 0
+                cursor: Any | None = None
+                for _ in range(64):
+                    result = (
+                        await self._client.list_tools()
+                        if cursor is None
+                        else await self._client.list_tools(cursor=cursor)
+                    )
+                    for tool in result.tools:
+                        observed_entries += 1
+                        raw_name = getattr(tool, "name", None)
+                        safe_raw_name = (
+                            raw_name
+                            if isinstance(raw_name, str)
+                            and re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", raw_name)
+                            else None
+                        )
+                        if safe_raw_name in duplicate_names:
+                            continue
+                        if safe_raw_name is not None and safe_raw_name in observed_names:
+                            tools_by_name.pop(safe_raw_name, None)
+                            duplicate_names.add(safe_raw_name)
+                            logger.warning(
+                                "mcp_discovery_tool_quarantined tool=%s reason_code=duplicate_name",
+                                safe_raw_name,
+                            )
+                            continue
+                        if safe_raw_name is not None:
+                            observed_names.add(safe_raw_name)
+                        normalized = _normalize_discovered_tool(tool)
+                        if normalized is None:
+                            continue
+                        name = normalized.name
+                        tools_by_name[name] = normalized
+                    if observed_entries > 256:
+                        raise RetrievalError(
+                            "MCP tool discovery exceeded the tool bound",
+                            code="mcp_tool_discovery_unbounded",
+                        )
+                    next_cursor = getattr(result, "next_cursor", None)
+                    if next_cursor is None or str(next_cursor) == "":
+                        return sorted(tools_by_name.values(), key=lambda tool: tool.name)
+                    cursor_key = str(next_cursor)
+                    if cursor_key in seen_cursors:
+                        raise RetrievalError(
+                            "MCP tool discovery repeated a pagination cursor",
+                            code="mcp_tool_discovery_cursor_repeated",
+                        )
+                    seen_cursors.add(cursor_key)
+                    cursor = next_cursor
+                raise RetrievalError(
+                    "MCP tool discovery exceeded the page bound",
+                    code="mcp_tool_discovery_unbounded",
                 )
-                for tool in result.tools
-            ]
-            return sorted(tools, key=lambda tool: tool.name)
         except Exception as error:
+            if isinstance(error, RetrievalError):
+                raise
             raise RetrievalError(
                 "MCP tool discovery failed",
                 code="mcp_tool_discovery_failed",
@@ -49,7 +116,11 @@ class SDKMCPConnection:
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> MCPCallResult:
         try:
-            result = await self._client.call_tool(name, arguments)
+            if self._semaphore is None:
+                result = await self._client.call_tool(name, arguments)
+            else:
+                async with self._semaphore:
+                    result = await self._client.call_tool(name, arguments)
             payload: dict[str, Any] = {"is_error": bool(result.is_error)}
             structured_content = getattr(result, "structured_content", None)
             if structured_content is not None:
@@ -84,6 +155,32 @@ class SDKMCPConnection:
             ) from error
 
 
+def _normalize_discovered_tool(tool: Any) -> MCPTool | None:
+    """Quarantine one malformed discovery entry without disabling other routes."""
+
+    raw_name: Any = None
+    try:
+        raw_name = tool.name
+        normalized = MCPTool(
+            name=raw_name,
+            description=getattr(tool, "description", None) or "",
+            input_schema=tool.input_schema,
+        )
+    except Exception:
+        safe_name = (
+            raw_name
+            if isinstance(raw_name, str)
+            and re.fullmatch(r"[A-Za-z0-9_.:/-]{1,128}", raw_name)
+            else "invalid"
+        )
+        logger.warning(
+            "mcp_discovery_tool_quarantined tool=%s reason_code=invalid_entry",
+            safe_name,
+        )
+        return None
+    return normalized
+
+
 class MCPClient:
     """Creates one authenticated Streamable HTTP MCP session per retrieval run."""
 
@@ -94,50 +191,75 @@ class MCPClient:
         http_client_factory: Callable[..., AbstractAsyncContextManager[Any]] = httpx2.AsyncClient,
         transport_factory: Callable[..., AbstractAsyncContextManager[Any]] = streamable_http_client,
         client_factory: Callable[[Any], AbstractAsyncContextManager[Any]] = Client,
+        semaphore: asyncio.Semaphore | None = None,
     ) -> None:
         self._settings = settings
         self._http_client_factory = http_client_factory
         self._transport_factory = transport_factory
         self._client_factory = client_factory
+        self._semaphore = semaphore
 
     @asynccontextmanager
     async def connect(self) -> AsyncIterator[MCPConnectionProtocol]:
         if not self._settings.mcp_url:
             raise RetrievalError("LUNIT_MCP_URL is not configured")
+        # Enforce the exact organizer endpoint at the last boundary before an
+        # HTTP-capable object is constructed.  This also covers unvalidated
+        # Settings.model_copy callers.
+        require_official_mcp_endpoint(self._settings.mcp_url)
         if not self._settings.api_key:
             raise ConfigurationError("LUNIT_FM_API_KEY is required for MCP requests")
 
-        caller_error: BaseException | None = None
-        try:
-            async with self._http_client_factory(
-                headers={"Authorization": f"Bearer {self._settings.api_key}"},
-                timeout=httpx2.Timeout(self._settings.request_timeout_seconds),
-                follow_redirects=True,
-            ) as http_client:
-                transport = self._transport_factory(
-                    self._settings.mcp_url,
-                    http_client=http_client,
-                )
-                async with self._client_factory(transport) as client:
-                    try:
-                        yield SDKMCPConnection(
-                            client,
-                            self._settings.max_tool_result_chars,
-                        )
-                    except BaseException as error:
-                        caller_error = error
-                        raise
-        except BaseException as error:
-            if caller_error is not None:
-                raise caller_error from None
-            if not isinstance(error, Exception):
-                raise
-            if isinstance(error, (ConfigurationError, RetrievalError)):
-                raise
-            raise RetrievalError(
-                "MCP connection failed",
-                code="mcp_connection_failed",
-            ) from error
+        async with _concurrency_slot(self._semaphore):
+            caller_error: BaseException | None = None
+            try:
+                async with self._http_client_factory(
+                    headers={"Authorization": f"Bearer {self._settings.api_key}"},
+                    timeout=httpx2.Timeout(self._settings.request_timeout_seconds),
+                    follow_redirects=False,
+                    trust_env=False,
+                ) as http_client:
+                    transport = self._transport_factory(
+                        self._settings.mcp_url,
+                        http_client=http_client,
+                    )
+                    async with self._client_factory(transport) as client:
+                        try:
+                            # The process-wide slot covers handshake, discovery and all
+                            # calls in this request-scoped MCP session. Passing no nested
+                            # semaphore avoids deadlocking a one-slot deployment.
+                            yield SDKMCPConnection(
+                                client,
+                                self._settings.max_tool_result_chars,
+                            )
+                        except BaseException as error:
+                            caller_error = error
+                            raise
+            except BaseException as error:
+                if caller_error is not None:
+                    raise caller_error from None
+                if not isinstance(error, Exception):
+                    raise
+                if isinstance(error, (ConfigurationError, RetrievalError)):
+                    raise
+                raise RetrievalError(
+                    "MCP connection failed",
+                    code="mcp_connection_failed",
+                ) from error
+
+
+@asynccontextmanager
+async def _concurrency_slot(
+    semaphore: asyncio.Semaphore | None,
+) -> AsyncIterator[None]:
+    if semaphore is None:
+        yield
+        return
+    await semaphore.acquire()
+    try:
+        yield
+    finally:
+        semaphore.release()
 
 
 def _serialize_content_block(block: Any) -> dict[str, Any]:
@@ -198,8 +320,8 @@ def collect_cite_uids(value: Any) -> list[str]:
                 visit(child, depth + 1)
         elif isinstance(item, str) and item.lstrip().startswith(("{", "[")):
             try:
-                nested = json.loads(item)
-            except json.JSONDecodeError:
+                nested = json.loads(item, parse_constant=_reject_nonfinite_json)
+            except (json.JSONDecodeError, ValueError):
                 return
             visit(nested, depth + 1)
 
@@ -221,6 +343,7 @@ def extract_citation_contents(value: Any) -> dict[str, str]:
                 found[cite_uid] = json.dumps(
                     item,
                     ensure_ascii=False,
+                    allow_nan=False,
                     separators=(",", ":"),
                     sort_keys=True,
                 )
@@ -231,8 +354,8 @@ def extract_citation_contents(value: Any) -> dict[str, str]:
                 visit(child, depth + 1)
         elif isinstance(item, str) and item.lstrip().startswith(("{", "[")):
             try:
-                nested = json.loads(item)
-            except json.JSONDecodeError:
+                nested = json.loads(item, parse_constant=_reject_nonfinite_json)
+            except (json.JSONDecodeError, ValueError):
                 return
             visit(nested, depth + 1)
 
@@ -250,8 +373,8 @@ def bound_mcp_content(
     if len(content) <= maximum:
         return content
     try:
-        payload = json.loads(content)
-    except json.JSONDecodeError:
+        payload = json.loads(content, parse_constant=_reject_nonfinite_json)
+    except (json.JSONDecodeError, ValueError):
         payload = {"raw_content": content}
     resolved_cite_uids = cite_uids if cite_uids is not None else collect_cite_uids(payload)
     return _bounded_json(payload, maximum, resolved_cite_uids)
@@ -261,6 +384,7 @@ def _bounded_json(payload: Any, maximum: int, cite_uids: list[str]) -> str:
     serialized = json.dumps(
         payload,
         ensure_ascii=False,
+        allow_nan=False,
         separators=(",", ":"),
         sort_keys=True,
     )
@@ -286,6 +410,7 @@ def _bounded_json(payload: Any, maximum: int, cite_uids: list[str]) -> str:
         empty = json.dumps(
             {**candidate, "preview": ""},
             ensure_ascii=False,
+            allow_nan=False,
             separators=(",", ":"),
             sort_keys=True,
         )
@@ -297,6 +422,7 @@ def _bounded_json(payload: Any, maximum: int, cite_uids: list[str]) -> str:
         return json.dumps(
             {**base, "preview": preview},
             ensure_ascii=False,
+            allow_nan=False,
             separators=(",", ":"),
             sort_keys=True,
         )
