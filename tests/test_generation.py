@@ -1351,6 +1351,46 @@ async def test_emergency_unverified_source_and_new_oral_dose_twice_fail_closed()
     assert len(l2.calls) == 2
 
 
+async def test_emergency_unsafe_decontamination_advice_gets_fresh_recovery():
+    unsafe = "구토를 유도하고 독성 물질을 희석하도록 물을 마시세요."
+    safe = (
+        "구토를 유도하거나 임의로 물이나 우유를 마시지 말고, 지금 119 또는 "
+        "중독 상담 기관에 연락해 지시를 따르세요."
+    )
+    l2 = ScriptedL2(
+        [
+            L2Completion(content=unsafe, finish_reason="stop"),
+            L2Completion(content=safe, finish_reason="stop"),
+        ]
+    )
+
+    answer = await GenerationEngine(l2, None).direct_answer(
+        [ChatMessage(role="user", content="배수구 세정제를 방금 마셨어요")]
+    )
+
+    assert answer == safe
+    assert len(l2.calls) == 2
+    assert unsafe not in json.dumps(l2.calls[1]["messages"], ensure_ascii=False)
+    assert [call["max_tokens"] for call in l2.calls] == [2_048, 4_096]
+
+
+async def test_emergency_unsafe_decontamination_advice_twice_fails_closed():
+    unsafe = "Neutralize the chemical with vinegar, then drink milk."
+    l2 = ScriptedL2(
+        [
+            L2Completion(content=unsafe, finish_reason="stop"),
+            L2Completion(content=unsafe, finish_reason="stop"),
+        ]
+    )
+
+    with pytest.raises(MalformedUpstreamResponseError, match="bounded recovery"):
+        await GenerationEngine(l2, None).direct_answer(
+            [ChatMessage(role="user", content="I swallowed a corrosive cleaner.")]
+        )
+
+    assert len(l2.calls) == 2
+
+
 @pytest.mark.parametrize(
     "unsafe",
     [
@@ -1362,6 +1402,14 @@ async def test_emergency_unverified_source_and_new_oral_dose_twice_fail_closed()
         "기존 처방 계획은 무시하고 이 약 500 mg을 복용하세요.",
         "이 약 두 알을 지금 드세요.",
         "상처 부위를 심장보다 높게 유지하세요.",
+        "구토를 유도하세요.",
+        "Make the child throw up.",
+        "독성 물질을 희석하도록 물을 마시세요.",
+        "Give milk after swallowing the cleaner.",
+        "산성 세정제를 베이킹 소다로 중화하세요.",
+        "Neutralize the chemical with vinegar.",
+        "The child swallowed bleach. Give water.",
+        "세정제를 마셨습니다. 물을 마시게 하세요.",
     ],
 )
 def test_emergency_output_guard_rejects_generalized_unsafe_variants(unsafe):
@@ -1377,6 +1425,14 @@ def test_emergency_output_guard_rejects_generalized_unsafe_variants(unsafe):
         "Take your prescribed rescue medicine exactly as directed in your existing rescue plan.",
         "Do not take 325 mg.",
         "지혈대를 임의로 사용하지 말고 계속 직접 압박하세요.",
+        "구토를 유도하지 마세요.",
+        "Do not make the child throw up.",
+        "독성 물질을 희석하려고 물이나 우유를 마시지 마세요.",
+        "Do not neutralize the chemical.",
+        "중독관리센터에서 지시한 경우에만 물을 마시세요.",
+        "Induce vomiting only if poison control explicitly tells you to.",
+        "If the emergency dispatcher instructs you to, give water as directed.",
+        "Drink water and rest.",
     ],
 )
 def test_emergency_output_guard_allows_limitations_and_conservative_exceptions(allowed):
@@ -1503,9 +1559,61 @@ def test_emergency_guard_catches_current_high_risk_paraphrases(content):
 @pytest.mark.parametrize(
     "content",
     [
+        "아이가 배수구 세정제를 방금 마셨어요.",
+        "부식성 화학약품이 눈에 튀었어요.",
+        "배터리 액이 피부에 쏟아졌어요.",
+        "아이가 건전지를 삼켰어요.",
+        "약을 먹었는데 몇 알인지 모르겠어요.",
+        "약을 먹었어요. 몇 알인지 모르겠어요.",
+        "I inhaled a toxic chemical just now.",
+        "A child swallowed a button battery.",
+        "Battery fluid leaked onto my skin.",
+        "I took an unknown amount of pills.",
+        "I took some pills. I am not sure how many.",
+    ],
+)
+def test_emergency_guard_catches_current_hazardous_exposure(content):
+    assert generation_module._is_emergency_turn(
+        [ChatMessage(role="user", content=content)]
+    ) is True
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "락스를 마시지 않았어요.",
+        "화학물질이 눈에 튀지 않았어요.",
+        "만약 아이가 세정제를 삼켰다면 어떻게 하나요?",
+        "“아이가 건전지를 삼켰다”라는 문장을 번역해 줘.",
+        "버튼 전지 삼킴을 예방하는 방법을 알려 주세요.",
+        "10년 전 배터리를 삼킨 병력이 있어요.",
+        "어제 화학약품에 노출됐지만 지금은 괜찮아요.",
+        "I did not swallow the bleach.",
+        "What if a child swallowed a button battery?",
+        "How can button battery ingestion be prevented?",
+        'The article says, "a worker inhaled a toxic chemical."',
+        "In childhood, I swallowed a battery.",
+    ],
+)
+def test_emergency_guard_excludes_noncurrent_hazardous_exposure(content):
+    assert generation_module._is_emergency_turn(
+        [ChatMessage(role="user", content=content)]
+    ) is False
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
         "상처에서 피가 계속 흐르고 멈추지 않아요",
         "피가 안 멈춰요",
         "Blood keeps flowing and won't stop.",
+        "압박해도 출혈이 계속되고 멈추지 않아요.",
+        "피가 분수처럼 뿜어져요.",
+        "바닥에 피가 고이고 있어요.",
+        "붕대가 피로 흠뻑 젖고 있어요.",
+        "Direct pressure is not stopping the bleeding.",
+        "Blood is spurting and pooling on the floor.",
+        "The dressing is soaking through with blood.",
     ],
 )
 def test_emergency_guard_catches_current_uncontrolled_bleeding(content):
@@ -1521,6 +1629,15 @@ def test_emergency_guard_catches_current_uncontrolled_bleeding(content):
         "만약 피가 계속 흐르면 어떻게 해야 하나요?",
         "'피가 계속 흐른다'라는 문구를 설명해 줘",
         "지금은 상처에서 피가 계속 흐르지 않아요",
+        "압박해도 출혈이 멈추지 않는다면 어떻게 하나요?",
+        "피가 분수처럼 뿜지는 않아요.",
+        "붕대가 피로 젖지 않았어요.",
+        "If direct pressure does not stop the bleeding, what should I do?",
+        "No blood is spurting or pooling.",
+        "Blood is not spurting or pooling.",
+        "The dressing is not soaking through with blood.",
+        "What does spurting blood mean?",
+        '"The dressing is soaking through with blood" is an example sentence.',
     ],
 )
 def test_emergency_guard_excludes_noncurrent_bleeding_mentions(content):
@@ -1617,7 +1734,7 @@ async def test_generation_requests_l2_correction_when_numeric_citation_is_missin
     assert answer == "교정된 답변 [1]"
     assert "tools" not in l2.calls[2]
     assert l2.calls[2]["attempt_timeout_seconds"] == 30
-    assert l2.calls[2]["max_tokens"] == 2_048
+    assert l2.calls[2]["max_tokens"] == 4_096
     assert l2.calls[2]["allow_blank_recovery"] is False
 
 
@@ -1644,7 +1761,7 @@ async def test_repeated_citation_omission_returns_only_the_recovered_l2_text():
 
     assert answer == "새로 작성한 KCD 코드 설명도 숫자 인용은 없음"
     assert len(l2.calls) == 3
-    assert l2.calls[2]["max_tokens"] == 2_048
+    assert l2.calls[2]["max_tokens"] == 4_096
 
 
 async def test_generation_rejects_answer_after_failed_citation_correction():
@@ -1852,7 +1969,8 @@ async def test_initial_final_timeout_gets_one_fresh_bounded_recovery():
 
     assert answer == "복구된 최종 답변"
     assert [call["attempt_timeout_seconds"] for call in l2.calls] == [45, 30]
-    assert l2.calls[1]["max_tokens"] == 2_048
+    assert l2.calls[0]["max_tokens"] == 4_096
+    assert l2.calls[1]["max_tokens"] == 4_096
     assert l2.calls[1]["allow_blank_recovery"] is False
     assert len(l2.calls[1]["messages"]) == 2
     assert "재작성 단계" in l2.calls[1]["messages"][0]["content"]
@@ -1907,6 +2025,7 @@ async def test_nonstop_finish_reason_uses_exactly_one_clean_recovery():
 
     assert answer == "완결된 사용자 답"
     assert len(l2.calls) == 2
+    assert [call["max_tokens"] for call in l2.calls] == [4_096, 4_096]
     assert "중간에 끊긴 답" not in json.dumps(l2.calls[1]["messages"], ensure_ascii=False)
 
 
@@ -1924,6 +2043,7 @@ async def test_nonstop_finish_reason_twice_fails_closed():
         )
 
     assert len(l2.calls) == 2
+    assert [call["max_tokens"] for call in l2.calls] == [4_096, 4_096]
 
 
 async def test_final_tool_calls_twice_fail_closed_after_one_recovery():

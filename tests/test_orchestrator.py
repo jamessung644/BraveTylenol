@@ -2,6 +2,7 @@ import asyncio
 
 import pytest
 
+from lunit_hackathon.config import Settings
 from lunit_hackathon.errors import (
     MalformedUpstreamResponseError,
     RetrievalError,
@@ -265,6 +266,51 @@ async def test_hybrid_rag_admission_never_waits_into_the_final_answer_reserve():
     assert generation.evidence_unavailable_calls == [messages]
     assert generation.direct_calls == []
     assert generation.rag_calls == []
+
+
+async def test_default_c16_rag_admission_has_no_artificial_evidence_failure(
+    monkeypatch,
+):
+    monkeypatch.delenv("MAX_CONCURRENT_RAG_REQUESTS", raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.max_concurrent_rag_requests == 16
+
+    class ConcurrentGeneration(HybridGeneration):
+        def __init__(self):
+            super().__init__()
+            self.all_admitted = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def answer(self, messages):
+            self.rag_calls.append(messages)
+            if len(self.rag_calls) == settings.max_concurrent_rag_requests:
+                self.all_admitted.set()
+            await self.release.wait()
+            return "RAG L2 answer"
+
+    generation = ConcurrentGeneration()
+    orchestrator = ChatOrchestrator(
+        l2_client=FakeL2(),
+        generation_engine=generation,
+        mode="hybrid",
+        rag_semaphore=asyncio.Semaphore(settings.max_concurrent_rag_requests),
+    )
+    messages = [ChatMessage(role="user", content="KCD I10 공식 명칭")]
+    tasks = [
+        asyncio.create_task(orchestrator.answer(messages))
+        for _ in range(settings.max_concurrent_rag_requests)
+    ]
+
+    try:
+        await asyncio.wait_for(generation.all_admitted.wait(), timeout=1)
+    finally:
+        generation.release.set()
+        answers = await asyncio.gather(*tasks)
+
+    assert answers == ["RAG L2 answer"] * 16
+    assert len(generation.rag_calls) == 16
+    assert generation.evidence_unavailable_calls == []
+    assert generation.direct_calls == []
 
 
 async def test_forced_rag_mode_uses_the_same_nonblocking_admission_limit():

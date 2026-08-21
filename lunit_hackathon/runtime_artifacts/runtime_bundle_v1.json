@@ -397,7 +397,7 @@
     },
     "30_RETRIEVAL_PROMPT.md": {
       "path": "docs/model-instructions/30_RETRIEVAL_PROMPT.md",
-      "sha256": "523a067ff3f7e587e45440eb2e43b067f7d7dcee85422d25c6df50f110229ac4"
+      "sha256": "06f5c93bcc3960c3b28feb472d53b0bb2dbb8d0b02a649a60b6139c8f78a40b9"
     },
     "45_RUNTIME_RESILIENCE.md": {
       "path": "docs/model-instructions/45_RUNTIME_RESILIENCE.md",

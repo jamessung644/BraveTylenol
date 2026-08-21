@@ -83,7 +83,7 @@ class Settings(BaseSettings):
         validation_alias="LUNIT_MCP_URL",
     )
     max_mcp_calls: int = Field(
-        default=1,
+        default=3,
         ge=0,
         le=12,
         validation_alias=AliasChoices("MAX_MCP_CALLS", "MAX_TOOL_CALLS"),
@@ -117,7 +117,7 @@ class Settings(BaseSettings):
         validation_alias="MAX_CONCURRENT_MCP_CALLS",
     )
     max_concurrent_rag_requests: int = Field(
-        default=4,
+        default=16,
         ge=1,
         le=16,
         validation_alias="MAX_CONCURRENT_RAG_REQUESTS",

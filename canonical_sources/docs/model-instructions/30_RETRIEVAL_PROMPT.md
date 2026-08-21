@@ -86,7 +86,7 @@ PubMed 초록만 확인한 경우 원문 전체의 방법·세부 결과를 검�
 </termination>
 ```
 
-Prompt compiler는 `[MAX_RETRIEVAL_CALLS]`를 release manifest의 1~12 정수로 정확히 한 번 치환한다. 현재 artifact ceiling은 3이고 runtime `MAX_MCP_CALLS` 기본값은 live paired A/B에서 승격 근거가 확인되지 않아 1이다. Request별 active prompt variant는 실제 적용 예산으로 이 문장을 다시 결정적으로 렌더링한다. 직접 구조화 HIRA/ADR route는 1, KCD는 2, MFDS는 필요한 ingredient/permission 원문까지 최대 2, guideline/index·research·법령 route는 최대 3이며, configured 값·artifact ceiling·domain ceiling 중 최솟값만 허용한다. 누락·비정수·범위 밖 값, 미치환 token, 중복 치환 또는 active prompt alias와 Model `tools[]` 불일치가 있으면 Retrieval L2를 호출하지 않는다. 이 예산은 MCP 검색·열람 호출만 세며 local finalizer 호출은 포함하지 않는다. 검색·목록·structure 같은 discovery-only 중간 결과는 응답에 UID가 있더라도 observed evidence ledger에 넣지 않으며 `sufficient` 종료에 사용할 수 없다.
+Prompt compiler는 `[MAX_RETRIEVAL_CALLS]`를 release manifest의 1~12 정수로 정확히 한 번 치환한다. 현재 artifact ceiling과 runtime `MAX_MCP_CALLS` 기본값은 모두 3이다. Request별 active prompt variant는 실제 적용 예산으로 이 문장을 다시 결정적으로 렌더링한다. 직접 구조화 HIRA/ADR route는 1, KCD는 2, MFDS는 필요한 ingredient/permission 원문까지 최대 2, guideline/index·research·법령 route는 최대 3이며, configured 값·artifact ceiling·domain ceiling 중 최솟값만 허용한다. 따라서 더 큰 기본 configured 값이 직접 구조화 조회를 불필요한 다중 호출로 늘리지 않으면서 guideline의 discovery→page 2-hop과 법령·research의 3-hop 완결 경로를 허용한다. 누락·비정수·범위 밖 값, 미치환 token, 중복 치환 또는 active prompt alias와 Model `tools[]` 불일치가 있으면 Retrieval L2를 호출하지 않는다. 이 예산은 MCP 검색·열람 호출만 세며 local finalizer 호출은 포함하지 않는다. 검색·목록·structure 같은 discovery-only 중간 결과는 응답에 UID가 있더라도 observed evidence ledger에 넣지 않으며 `sufficient` 종료에 사용할 수 없다.
 
 ## Retrieval 종료 함수 계약
 

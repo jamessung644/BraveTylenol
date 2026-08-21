@@ -108,13 +108,20 @@ def test_container_defaults_to_bounded_hybrid_mode(monkeypatch):
     monkeypatch.delenv("AGENT_MODE", raising=False)
     monkeypatch.delenv("HARNESS_MODE", raising=False)
     monkeypatch.delenv("LUNIT_MCP_URL", raising=False)
+    monkeypatch.delenv("MAX_MCP_CALLS", raising=False)
+    monkeypatch.delenv("MAX_TOOL_CALLS", raising=False)
+    monkeypatch.delenv("MAX_CONCURRENT_MODEL_CALLS", raising=False)
+    monkeypatch.delenv("MAX_CONCURRENT_MCP_CALLS", raising=False)
+    monkeypatch.delenv("MAX_CONCURRENT_RAG_REQUESTS", raising=False)
 
     settings = Settings(_env_file=None)
 
     assert settings.agent_mode == "hybrid"
     assert settings.mcp_url == "https://mcp.hackathon.lunit.io/mcp"
-    assert settings.max_mcp_calls == 1
-    assert settings.max_concurrent_rag_requests == 4
+    assert settings.max_mcp_calls == 3
+    assert settings.max_concurrent_model_calls == 16
+    assert settings.max_concurrent_mcp_calls == 16
+    assert settings.max_concurrent_rag_requests == 16
 
 
 def test_legacy_baseline_environment_names_remain_supported(monkeypatch):

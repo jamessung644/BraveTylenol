@@ -92,6 +92,8 @@ class SDKBackedMCP:
 
 def settings(monkeypatch, **updates):
     monkeypatch.setenv("LUNIT_FM_API_KEY", "lunit_test_team_key")
+    monkeypatch.delenv("MAX_MCP_CALLS", raising=False)
+    monkeypatch.delenv("MAX_TOOL_CALLS", raising=False)
     return Settings(_env_file=None).model_copy(update=updates)
 
 
@@ -493,7 +495,7 @@ async def test_official_drug_label_intent_uses_only_bounded_adr_route(
     await RetrievalEngine(
         l2,
         FakeMCP(canonical_tools(), {}),
-        settings(monkeypatch, max_mcp_calls=3),
+        settings(monkeypatch),
     ).retrieve(query)
 
     request = l2.calls[0]
@@ -522,7 +524,7 @@ async def test_domain_ceiling_is_rendered_into_exact_active_prompt(
     await RetrievalEngine(
         l2,
         FakeMCP(canonical_tools(), {}),
-        settings(monkeypatch, max_mcp_calls=3),
+        settings(monkeypatch),
     ).retrieve(query)
 
     request = l2.calls[0]
@@ -565,7 +567,7 @@ async def test_research_chain_reaches_vector_evidence_on_third_hop(monkeypatch):
     result = await RetrievalEngine(
         l2,
         mcp,
-        settings(monkeypatch, max_mcp_calls=3),
+        settings(monkeypatch),
     ).retrieve("Find the PubMed research evidence for aspirin.")
 
     assert [name for name, _ in mcp.calls] == [
@@ -694,7 +696,7 @@ async def test_discovery_only_uid_cannot_be_finalized_as_evidence(monkeypatch):
     assert caught.value.code == "retrieval_finalize_unobserved_uid"
 
 
-async def test_guideline_ab_max_two_reaches_citable_page(monkeypatch):
+async def test_default_budget_guideline_reaches_citable_page_in_two_hops(monkeypatch):
     l2 = ScriptedL2(
         [
             L2Completion(tool_calls=[call("nodes", "index_get_relevant_nodes", {})]),
@@ -725,7 +727,7 @@ async def test_guideline_ab_max_two_reaches_citable_page(monkeypatch):
     result = await RetrievalEngine(
         l2,
         mcp,
-        settings(monkeypatch, max_mcp_calls=2),
+        settings(monkeypatch),
     ).retrieve("현재 당뇨 진단 기준 최신 진료지침")
 
     assert result.status == "sufficient"
@@ -740,7 +742,7 @@ async def test_guideline_ab_max_two_reaches_citable_page(monkeypatch):
     assert active_aliases(l2.calls[0]) == INDEX_ALIASES
 
 
-async def test_infection_law_max_three_requires_article_body_for_citation(monkeypatch):
+async def test_default_budget_law_reaches_article_body_in_three_hops(monkeypatch):
     l2 = ScriptedL2(
         [
             L2Completion(tool_calls=[call("law", "openapi_law_search", {})]),
@@ -779,7 +781,7 @@ async def test_infection_law_max_three_requires_article_body_for_citation(monkey
     result = await RetrievalEngine(
         l2,
         mcp,
-        settings(monkeypatch, max_mcp_calls=3),
+        settings(monkeypatch),
     ).retrieve("감염병의 예방 및 관리에 관한 법률 제49조 시행 조문")
 
     assert result.status == "sufficient"
@@ -927,7 +929,7 @@ async def test_ingredient_only_mfds_route_gets_one_product_label_followup(monkey
     result = await RetrievalEngine(
         l2,
         mcp,
-        settings(monkeypatch, max_mcp_calls=3),
+        settings(monkeypatch),
     ).retrieve("식약처에서 아세트아미노펜 성분 제품의 허가사항을 확인해 줘")
 
     assert [item.cite_uid for item in result.items] == ["mfds:product-label"]

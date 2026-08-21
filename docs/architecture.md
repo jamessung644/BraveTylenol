@@ -49,7 +49,7 @@ mode selection (default hybrid; direct opt-out)
         |
         +-- direct 또는 일반/응급/저위험·안정 정보 --> direct Generation L2 1회 --> L2 text
         |
-        +-- source-dependent --> RAG admission (최대 4)
+        +-- source-dependent --> RAG admission (최대 16)
                                   |
                                   +-- full + source-dependent --> mcp_failure_final L2 1회
                                   +-- full + non-source --> direct L2 1회
@@ -67,7 +67,7 @@ mode selection (default hybrid; direct opt-out)
                            query별 최소 tool subset 선택
                                         |
                                         v
-                       Retrieval L2 -- MCP remote call 기본 1회/ceiling 3회
+                       Retrieval L2 -- MCP configured 기본/ceiling 3회
                                         |
                                         v
                       local finalize + observed cite_uid 검증
@@ -154,16 +154,16 @@ tool을 L2에 노출하지 않는다. 질문 도메인의 도구가 전부 격�
 | 일반 guideline | index keyword/relevant node discovery + page content (최대 3-hop) |
 | research | data-source discovery + source detail + vector query (최대 3-hop) |
 
-Retrieval L2의 MCP remote call budget은 기본 한 번이며 실험·release artifact와 도메인 ceiling
-안에서 최대 세 번이다. Budget 뒤에는 strict local `finalize_retrieval`을 강제한다. Finalizer는 MCP endpoint로 보내지 않으며 실제
+Retrieval L2의 MCP remote call configured budget과 release artifact ceiling은 모두 3이며,
+실제 budget은 도메인별 1~3회 ceiling으로 다시 제한한다. Budget 뒤에는 strict local
+`finalize_retrieval`을 강제한다. Finalizer는 MCP endpoint로 보내지 않으며 실제
 result에서 관찰된 `cite_uid`, score 범위, 중복, item 수를 검증한다. Tool content는 8,000자,
 전체 evidence는 12,000자로 제한한다.
 
-`AGENT_MODE=hybrid`만 켜면 안전한 기본 `MAX_MCP_CALLS=1`이 유지된다. MFDS 2-hop이나
-guideline·research·법령 3-hop을 실험하려면 `MAX_MCP_CALLS=2|3`도 명시해야 하며, 이 값은
-artifact ceiling과 도메인 ceiling을 넘지 못한다. 현재 paired live 결과는 기본 hybrid 승격을
-지지하지 않았지만, 최종 제출 지시에 따라 hybrid를 기본값으로 선택한다. `MAX_MCP_CALLS=1`과
-direct fast path를 유지하고 `AGENT_MODE=direct`로 즉시 비활성화할 수 있다.
+기본 `MAX_MCP_CALLS=3`은 structured HIRA/ADR을 여전히 1-hop으로 유지하면서 MFDS의 필요한
+2-hop, guideline의 discovery→page 2-hop, 법령·research의 3-hop 완결 경로를 허용한다.
+Configured 값은 artifact ceiling과 domain ceiling을 넘지 못하며 `AGENT_MODE=direct`로 MCP를
+즉시 비활성화할 수 있다.
 
 ## 시간 예산과 MCP stall 격리
 
@@ -174,13 +174,13 @@ direct fast path를 유지하고 `AGENT_MODE=direct`로 즉시 비활성화할 �
 | model retry | 0 | tail latency 억제 |
 | RAG initial application-tool | 25초 | retrieval query 생성 |
 | forced-tool retry | 10초 | 명시적 source 요청에서 tool call 누락 시 한 번만 재강제 |
-| emergency final | 45초, 최대 1,536 tokens | 검색 전 즉시 행동 답변 |
+| emergency final | 45초, 최대 2,048 tokens | 검색 전 즉시 행동 답변 |
 | retrieval hard slice | `min(50초, request × 0.31)` = 50초 | MCP와 planner 전체 격리 |
 | retrieval planner L2 | attempt당 25초 | remote call 계획 및 local finalization; 전체 Retrieval 50초 상한 적용 |
-| final Generation | 45초, 최대 3,072 tokens | evidence/no-evidence 뒤 사용자 답변 reserve |
-| clean final recovery | 30초, 최대 1,536 tokens | plain text·종료 사유·인용 invariant 재생성 또는 최초 final timeout 복구, 정확히 1회 |
-| RAG admission | 4 | slow trajectory 동시 진입 제한 |
-| MCP call | 기본 1, effective ceiling 3 | artifact·설정·도메인 중 최솟값으로 tool loop 상한 |
+| final Generation | 45초, 최대 4,096 tokens | evidence/no-evidence 뒤 사용자 답변 reserve |
+| clean final recovery | 30초, 최대 4,096 tokens | plain text·종료 사유·인용 invariant 재생성 또는 최초 final timeout 복구, 정확히 1회 |
+| RAG admission | 16 | 공식 C16 cohort를 수용하고 초과 요청은 즉시 하향 |
+| MCP call | configured 기본 3, effective ceiling 1~3 | artifact·설정·도메인 중 최솟값으로 tool loop 상한 |
 | model semaphore | 16 | CoEval 동시성에 맞춘 보호 |
 | MCP session semaphore | 16 | connect/discovery/call 전체 점유 제한 |
 
@@ -191,8 +191,9 @@ forced-tool, planner와 모든 final/recovery 단계는 client 내부 blank-comp
 clean final recovery를 정확히 한 번 실행하고, 재실패는 sanitized 502로 종료한다.
 
 MCP transport의 connect/discovery/call이 정지해도 Retrieval 전체 `asyncio.timeout`이 먼저
-취소하고 `retrieval_timeout` no-evidence로 전환한다. Hybrid와 forced RAG의 admission
-acquire도 0.01초만 기다린 뒤 direct로 전환한다. 이 둘은 MCP를 무한 대기시키는 것이 아니라
+취소하고 `retrieval_timeout` no-evidence로 전환한다. Hybrid와 forced RAG admission은 사용
+가능한 permit을 타이머 없이 즉시 획득하고, 16개가 모두 점유된 경우에는 대기하지 않고 하향한다.
+이 둘은 MCP를 무한 대기시키는 것이 아니라
 **MCP 때문에 최종
 L2 응답 기회를 잃지 않도록** first-routing slice와 final-generation slice를 예약하는 방식이다.
 

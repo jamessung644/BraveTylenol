@@ -46,9 +46,11 @@ class ChatOrchestrator:
 
         if self._rag_semaphore is None:
             return await self._rag(messages)
-        try:
-            await asyncio.wait_for(self._rag_semaphore.acquire(), timeout=0.01)
-        except TimeoutError:
+        # ``Semaphore.acquire`` completes synchronously while a permit is
+        # available.  Check saturation before awaiting so admission never
+        # depends on an arbitrary event-loop timer and never queues behind a
+        # full RAG cohort into the final-answer reserve.
+        if self._rag_semaphore.locked():
             # Saturation must not queue into the final-answer reserve. Only a
             # source-dependent request needs the explicit no-evidence final;
             # forced-RAG traffic without source dependency can remain direct.
@@ -57,6 +59,7 @@ class ChatOrchestrator:
                 return await self._evidence_unavailable(messages)
             logger.info("rag_admission_full route=direct")
             return await self._direct(messages)
+        await self._rag_semaphore.acquire()
         try:
             return await self._rag(messages)
         finally:

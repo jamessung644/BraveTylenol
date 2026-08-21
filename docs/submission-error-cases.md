@@ -56,6 +56,21 @@ Use this checklist before promoting a submission commit.
   runtime suite separate, and require the packaging test to show that excluded
   legacy files cannot affect the image.
 
+## Natural-language regression retention
+
+- Do not equate a grammatical form with clinical urgency. A noun-like fragment
+  such as `삼킴` is an exposure action only when a hazardous object and a
+  current, non-negated assertion are both present. Definition, prevention,
+  hypothetical, quoted, historical, and explicitly negated uses must remain
+  non-emergency.
+- Run the frozen synthetic medical gate before release. Once a fixture
+  generation has been observed, never rewrite its prompts or invariants to make
+  a result pass. Preserve it and append a new permanent case ID in the next
+  versioned generation.
+- Record newly observed error classes here and add a dataset-independent
+  regression case. Do not add benchmark item IDs, reference answers, or
+  question-specific routing rules.
+
 ## Branch synchronization
 
 - Check whether the remote branch advanced before every push. Do not overwrite

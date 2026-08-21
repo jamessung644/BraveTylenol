@@ -61,7 +61,7 @@ context로 downgrade된다. Client가 보낸 tool/function protocol field와 too
 대화의 키워드가 현재 질문을 불필요하게 RAG로 보내지 않게 한다.
 
 기본값은 `AGENT_MODE=hybrid`이며 위 source-dependent routing을 활성화한다.
-`AGENT_MODE=direct`는 MCP를 완전히 끄는 비교·복구 variant다. Hybrid와 forced RAG 모두 admission 4개가 이미
+`AGENT_MODE=direct`는 MCP를 완전히 끄는 비교·복구 variant다. Hybrid와 forced RAG 모두 admission 16개가 이미
 사용 중이면 대기열에서 최종 답변 시간을 소모하지 않는다. source-dependent 요청은 fresh
 `mcp_failure_final`로, 그 밖의 요청은 direct L2로 전환한다. `AGENT_MODE=rag`는 모든 정상
 질문에 Retrieval 도구를 노출하는 진단용, `AGENT_MODE=passthrough`는 검색 조정 없이 안전
@@ -76,16 +76,16 @@ system prompt를 붙이는 진단용이다.
 | L2 retry | 0회 | 재시도 꼬리 지연 제거 |
 | RAG initial application-tool | 25초 | retrieval query 생성 단계 |
 | forced-tool retry | 10초 | source-dependent 요청에서 tool call 누락 시 한 번만 강제 |
-| emergency final | 45초, 최대 1,536 tokens | deterministic guard가 선택한 fresh no-tool 최종 단계 상한 |
+| emergency final | 45초, 최대 2,048 tokens | deterministic guard가 선택한 fresh no-tool 최종 단계 상한 |
 | Retrieval hard slice | `min(50초, 165초 × 0.31)` = 50초 | MCP와 Retrieval planner 전체 격리 |
 | Retrieval planner L2 | attempt당 25초 | MCP call 계획과 local finalization 단계; 전체 Retrieval 50초 상한 안에서 동작 |
-| final Generation | 45초, 최대 3,072 tokens | evidence/no-evidence 이후 사용자 답변 reserve |
-| clean final recovery | 30초, 최대 1,536 tokens | final 출력의 구조·citation 검증 실패 또는 최초 final timeout 시 fresh no-tool 재작성 상한 |
-| RAG admission | 4개 | 느린 source-dependent 경로의 동시 진입 제한 |
-| MCP remote call | 기본 1회, release ceiling 3회 | 도메인별 완결 단계만 허용하고 무제한 loop 방지 |
+| final Generation | 45초, 최대 4,096 tokens | evidence/no-evidence 이후 사용자 답변 reserve |
+| clean final recovery | 30초, 최대 4,096 tokens | final 출력의 구조·citation 검증 실패 또는 최초 final timeout 시 fresh no-tool 재작성 상한 |
+| RAG admission | 16개 | 공식 C16 cohort를 수용하고 초과 요청은 즉시 하향 |
+| MCP remote call | 기본 3회, release ceiling 3회 | 실제 호출은 도메인 ceiling 1~3회로 제한 |
 | L2 동시 호출 | 16개 | CoEval 동시성에 맞춘 upstream 보호 |
 | MCP 동시 연결 | 16개 | connection/session 점유 제한 |
-| 요청 completion 상한 | 최대 4,096 tokens | decision/planner는 1,536, 일반 final은 3,072, 응급·복구는 1,536으로 phase별 제한 |
+| 요청 completion 상한 | 최대 4,096 tokens | decision/planner는 1,536, 일반 final·복구는 4,096, 응급은 2,048로 phase별 제한 |
 
 각 phase timeout에는 model semaphore 대기시간도 포함된다. `tool_decision`의 출력은 사용자에게
 반환하지 않는다. `direct_final`, `post_retrieval_final`, `mcp_failure_final`, `emergency_final`은
@@ -119,10 +119,10 @@ end-to-end timeout으로 확대되는 경로를 줄인다.
    과장하지 않는다.
 3. 각 query에는 KCD, MFDS, HIRA, 법령, ADR 또는 일반 guideline/research 중 관련된 최소
    tool subset만 Retrieval L2에 노출한다.
-4. remote MCP call은 기본 한 번이다. 실험·release artifact와 도메인 ceiling 안에서 최대
-   세 번까지 설정할 수 있고, `finalize_retrieval`은 endpoint로 보내지 않는 local finalizer다.
-   `AGENT_MODE=hybrid`만 설정하면 `MAX_MCP_CALLS=1`이 유지된다. MFDS 2-hop 또는
-   guideline·research·법령 3-hop 실험은 `MAX_MCP_CALLS=2|3`을 별도로 명시해야 한다.
+4. remote MCP call의 configured 기본값과 release artifact ceiling은 3이다. 실제 호출은
+   구조화 HIRA/ADR 1-hop, KCD·MFDS 최대 2-hop, guideline·research·법령 최대 3-hop의
+   도메인 ceiling으로 다시 제한하며, `finalize_retrieval`은 endpoint로 보내지 않는 local
+   finalizer다.
 5. 실제 tool result에서 관찰한 `cite_uid`만 선택하고 중복·크기·citation 범위를 검증한다.
    근거가 없으면 UID나 출처를 합성하지 않는다.
 6. 최종 답변은 허용된 숫자형 citation만 사용할 수 있으며 검증 실패 시에도 Python이 답변을

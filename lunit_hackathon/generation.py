@@ -41,7 +41,10 @@ _RECOVERY_TIMEOUT_SECONDS = 30.0
 _EMERGENCY_TIMEOUT_SECONDS = 45.0
 _FINAL_MAX_TOKENS = 4_096
 _EMERGENCY_MAX_TOKENS = 2_048
-_RECOVERY_MAX_TOKENS = 2_048
+# A clean retry must have enough room to replace any regular final that reached
+# its output limit. Keeping this tied to the regular cap prevents the retry from
+# being structurally more likely to truncate than the draft it replaces.
+_RECOVERY_MAX_TOKENS = _FINAL_MAX_TOKENS
 _FINAL_PHASES = ("direct", "post_retrieval", "mcp_failure", "emergency")
 FinalPhase = Literal["direct", "post_retrieval", "mcp_failure", "emergency"]
 _PROTOCOL_FUNCTION_NAMES = frozenset(
@@ -1719,6 +1722,65 @@ def _contains_unsupported_emergency_claim(content: str) -> bool:
         r"(?:(?:팔|다리|사지|상처\s*부위).{0,24}(?:심장보다\s*)?"
         r"(?:높이|높게|올리)|\belevat(?:e|ing)\b.{0,24}(?:limb|arm|leg|wound))"
     )
+    induced_vomiting_action = re.compile(
+        r"(?:구토(?:를)?\s*(?:유도|시키)|"
+        r"(?:억지로\s*)?토(?:하게|하도록)\s*(?:하|만들)|"
+        r"(?:induc(?:e|ing)|cause)\s+(?:them\s+|the\s+(?:person|patient|child)\s+)?"
+        r"(?:vomit(?:ing)?|emesis)|"
+        r"make\s+(?:them|him|her|the\s+(?:person|patient|child))\s+"
+        r"(?:vomit|throw\s+up))"
+    )
+    milk_or_water_action = re.compile(
+        r"(?:(?:물|우유)(?:을|를)?\s*(?:마시|마셔|먹이|먹으|드세|섭취)|"
+        r"(?:마시|마셔|먹이|먹으|드세|섭취).{0,12}(?:물|우유)|"
+        r"\b(?:drink|sip|give|administer)\b.{0,24}\b(?:water|milk)\b)"
+    )
+    decontamination_context = re.compile(
+        r"(?:독|유독|독성|부식|화학|약품|세제|세정제|락스|표백제|"
+        r"산성|염기|중화|희석|씻어\s*내|제거|삼킨|먹은|마신|섭취|"
+        r"poison|toxi|corrosive|caustic|chemical|cleaner|detergent|bleach|"
+        r"acid|alkali|decontaminat|dilut|flush|neutraliz|swallow|ingest)"
+    )
+    neutralization_action = re.compile(
+        r"(?:중화(?:하|시키)|"
+        r"(?:식초|베이킹\s*소다|산|염기|알칼리).{0,24}"
+        r"(?:중화|산성|염기성)(?:을|를)?\s*(?:없애|잡)|"
+        r"\bneutraliz(?:e|es|ed|ing)\b|"
+        r"\bcounteract\b.{0,24}\b(?:chemical|acid|alkali|caustic|corrosive)\b)"
+    )
+    poison_or_dispatcher_instruction = re.compile(
+        r"(?:(?:중독\s*(?:관리|상담)?\s*센터|독극물\s*센터|119|"
+        r"응급\s*(?:상담원|상황실|요원)|구급\s*(?:상담원|대원))"
+        r".{0,40}(?:지시|안내|말|시키|권고)|"
+        r"(?:지시|안내|말|시키|권고).{0,40}"
+        r"(?:중독\s*(?:관리|상담)?\s*센터|독극물\s*센터|119|"
+        r"응급\s*(?:상담원|상황실|요원)|구급\s*(?:상담원|대원))|"
+        r"(?:poison\s+(?:control|center|centre|hotline)|dispatcher|"
+        r"emergency\s+(?:operator|dispatcher)|paramedic)"
+        r".{0,48}(?:instruct|direct|tell|told|advise|say|says)|"
+        r"(?:instruct|direct|tell|told|advise|say|says).{0,48}"
+        r"(?:poison\s+(?:control|center|centre|hotline)|dispatcher|"
+        r"emergency\s+(?:operator|dispatcher)|paramedic))"
+    )
+    targeted_negative_vomiting = re.compile(
+        r"(?:(?:구토|토(?:하게|하도록)).{0,24}"
+        r"(?:하지\s*마|시키지\s*마|유도하지\s*마)|"
+        r"(?:하지\s*마|시키지\s*마|유도하지\s*마).{0,20}(?:구토|토)|"
+        r"(?:do\s+not|don't|never|avoid|should\s+not|must\s+not)"
+        r".{0,32}(?:induc(?:e|ing)\s+(?:vomit(?:ing)?|emesis)|"
+        r"make.{0,16}(?:vomit|throw\s+up)))"
+    )
+    targeted_negative_drinking = re.compile(
+        r"(?:(?:물|우유).{0,24}(?:마시지\s*마|먹이지\s*마|주지\s*마)|"
+        r"(?:do\s+not|don't|never|avoid|should\s+not|must\s+not)"
+        r".{0,32}(?:drink|sip|give|administer).{0,20}(?:water|milk))"
+    )
+    targeted_negative_neutralization = re.compile(
+        r"(?:(?:중화하|중화시키).{0,16}(?:지\s*마|지\s*않)|"
+        r"(?:do\s+not|don't|never|avoid|should\s+not|must\s+not)"
+        r".{0,32}(?:neutraliz|counteract))"
+    )
+    has_decontamination_context = bool(decontamination_context.search(normalized))
 
     for clause in clauses:
         compact = clause.strip()
@@ -1752,6 +1814,33 @@ def _contains_unsupported_emergency_claim(content: str) -> bool:
                 ]
             ):
                 return True
+
+        decontamination_exception = bool(
+            poison_or_dispatcher_instruction.search(compact)
+        ) and not bool(exception_cancellation.search(compact))
+        vomiting_match = induced_vomiting_action.search(compact)
+        if (
+            vomiting_match
+            and not targeted_negative_vomiting.search(compact)
+            and not decontamination_exception
+        ):
+            return True
+        drinking_match = milk_or_water_action.search(compact)
+        if drinking_match:
+            drink_text = drinking_match.group(0)
+            is_milk_advice = "우유" in drink_text or "milk" in drink_text
+            if (
+                (is_milk_advice or has_decontamination_context)
+                and not targeted_negative_drinking.search(compact)
+                and not decontamination_exception
+            ):
+                return True
+        if (
+            neutralization_action.search(compact)
+            and not targeted_negative_neutralization.search(compact)
+            and not decontamination_exception
+        ):
+            return True
         if has_exception:
             continue
         for unsafe_action in (tourniquet_action, elevation_action):
@@ -2103,6 +2192,8 @@ def _is_emergency_turn(messages: Sequence[ChatMessage]) -> bool:
     if len(user_turns) >= 2 and _needs_prior_emergency_context(user_turns[-1]):
         scoped_turns.insert(0, user_turns[-2])
     text = unicodedata.normalize("NFKC", "\n".join(scoped_turns)).casefold()
+    if _has_current_hazardous_ingestion_or_exposure(text):
+        return True
     markers = (
         "의식이 없",
         "숨을 못",
@@ -2117,7 +2208,6 @@ def _is_emergency_turn(messages: Sequence[ChatMessage]) -> bool:
         "죽고 싶",
         "과다복용",
         "많이 먹었",
-        "버튼전지",
         "일산화탄소",
         "청색증",
         "목이 붓",
@@ -2207,7 +2297,6 @@ def _is_emergency_turn(messages: Sequence[ChatMessage]) -> bool:
         "과다복용",
         "많이먹었",
         "많이먹음",
-        "버튼전지",
         "일산화탄소",
         "청색증",
         "목붓",
@@ -2236,44 +2325,216 @@ def _is_emergency_turn(messages: Sequence[ChatMessage]) -> bool:
 
 def _has_current_uncontrolled_bleeding(text: str) -> bool:
     patterns = (
-        (r"(?:피|출혈).{0,18}(?:안\s*멈|멈추지|멎지)", False),
-        (r"(?:피|출혈).{0,12}(?:계속|지속).{0,12}(?:나|흐르|쏟)", True),
-        (r"(?:계속|지속).{0,12}(?:피|출혈).{0,12}(?:나|흐르|쏟)", True),
-        (
-            r"(?:bleeding|blood).{0,24}(?:won['’]?t\s+stop|will\s+not\s+stop|"
-            r"keeps?\s+(?:flowing|bleeding)|continu(?:es|ing))",
-            False,
-        ),
+        r"(?:피|출혈).{0,18}(?:안\s*멈|멈추지|멎지)",
+        r"(?:피|출혈).{0,12}(?:계속|지속).{0,12}(?:나|흐르|쏟)",
+        r"(?:계속|지속).{0,12}(?:피|출혈).{0,12}(?:나|흐르|쏟)",
+        r"(?:압박|눌렀|누르고|누르는).{0,36}"
+        r"(?:피|출혈|지혈).{0,20}"
+        r"(?:안\s*멈|멈추지|계속|안\s*되|되지\s*않|조절되지\s*않)",
+        r"(?:피|출혈).{0,32}(?:압박|눌러).{0,24}"
+        r"(?:안\s*멈|멈추지|계속|소용\s*없)",
+        r"(?:피|출혈).{0,28}"
+        r"(?:분수처럼|뿜|분출|솟구|맥박처럼|박동성으로|쏟아|고이|고여|흥건)",
+        r"(?:분수처럼|뿜|분출|솟구|맥박처럼|박동성으로|쏟아|고이|고여|흥건)"
+        r".{0,28}(?:피|출혈)",
+        r"(?:(?:붕대|거즈|수건|천).{0,24}(?:피|출혈).{0,20}"
+        r"(?:흠뻑|젖|스며|배어|뚫고|통과)|"
+        r"(?:피|출혈).{0,24}(?:붕대|거즈|수건|천).{0,20}"
+        r"(?:흠뻑|젖|스며|배어|뚫고|통과))",
+        r"(?:bleeding|blood).{0,32}(?:won['’]?t\s+stop|will\s+not\s+stop|"
+        r"keeps?\s+(?:flowing|bleeding)|continu(?:es|ing)|"
+        r"spurt|squirt|gush|pulsat|pool|soak(?:s|ed|ing)?\s+through)",
+        r"(?:spurt|squirt|gush|pulsat|pool|soak(?:s|ed|ing)?\s+through)"
+        r".{0,32}(?:bleeding|blood|bandage|dressing|gauze|towel|cloth)",
+        r"(?:direct|firm|hard|steady)?\s*pressure.{0,48}"
+        r"(?:does\s+not|doesn't|is\s+not|isn't|won['’]?t|will\s+not|failed?\s+to)"
+        r".{0,20}(?:stop|control).{0,16}(?:bleeding|blood)?",
+        r"(?:direct|firm|hard|steady)?\s*pressure.{0,40}"
+        r"(?:fail(?:ed|s|ing)?|is\s+not|isn't|not)\s+(?:work(?:ing)?|enough)"
+        r".{0,28}(?:bleeding|blood)",
+        r"(?:bleeding|blood).{0,40}(?:despite|after|even\s+with)"
+        r".{0,28}(?:direct|firm|hard|steady)?\s*pressure",
+        r"(?:bandage|dressing|gauze|towel|cloth).{0,32}"
+        r"(?:soak(?:s|ed|ing)?\s+through|saturat(?:e|ed|ing)).{0,24}"
+        r"(?:bleeding|blood)?",
     )
-    for pattern, flow_verb_match in patterns:
+    for pattern in patterns:
         for match in re.finditer(pattern, text, re.IGNORECASE):
-            before = text[max(0, match.start() - 48) : match.start()]
-            after = text[match.end() : match.end() + 96]
+            matched_text = match.group(0)
             if re.search(
-                r"(?:기사|뉴스|논문|예시|가상|교육|드라마|만약|가정|혹시)"
-                r".{0,24}$",
-                before,
+                r"(?:\b(?:is|are|was|were)\s+not\b|\b(?:isn't|aren't|"
+                r"wasn't|weren't)\b).{0,16}"
+                r"(?:spurt|squirt|gush|pulsat|pool|soak|saturat)|"
+                r"\b(?:would|could|might)\b.{0,24}"
+                r"(?:spurt|squirt|gush|pulsat|pool|soak|saturat)",
+                matched_text,
+                re.IGNORECASE,
             ):
                 continue
-            if re.match(r".{0,8}(?:면|경우|if\b)", after, re.IGNORECASE):
-                continue
-            if re.match(
-                r".{0,16}(?:라고|라는)\s*(?:표현|문구|인용)",
-                after,
-            ):
-                continue
-            if flow_verb_match and re.match(r"\s*(?:지|지는)?\s*않", after):
-                continue
-            if re.search(
-                r"(?:어제|과거|예전|지난번|\d+\s*년\s*전).{0,24}$",
-                before,
-            ) and re.search(
-                r".{0,24}(?:지금|현재).{0,24}(?:멈|멎|괜찮|없)",
-                after,
-            ):
-                continue
+            if _emergency_span_is_current(text, match.start(), match.end()):
+                return True
+    return False
+
+
+def _has_current_hazardous_ingestion_or_exposure(text: str) -> bool:
+    """Recognize current hazardous contact without maintaining product-specific cases."""
+
+    hazard = re.compile(
+        r"(?:독극물|유독(?:성)?|독성|부식성?|화학\s*(?:물질|약품|제품)?|"
+        r"세척제|세정제|배수구\s*(?:세정제|청소제)|락스|표백제|농약|살충제|"
+        r"제초제|부동액|휘발유|등유|메탄올|산성\s*(?:물질|용액)|"
+        r"염기성?\s*(?:물질|용액)|알칼리|건전지|배터리|전지|코인셀|"
+        r"\b(?:poison(?:ous)?|toxic|corrosive|caustic|chemical|cleaner|"
+        r"detergent|bleach|pesticide|insecticide|herbicide|antifreeze|"
+        r"gasoline|kerosene|methanol|acid|alkali|battery|button\s+cell)\b)"
+    )
+    risky_substance = re.compile(
+        r"(?:약|알약|정제|캡슐|시럽|보충제|비타민|술|알코올|"
+        r"\b(?:medicines?|medications?|drugs?|pills?|tablets?|capsules?|"
+        r"supplements?|vitamins?|alcohol|substances?)\b)"
+    )
+    unknown_quantity = re.compile(
+        r"(?:(?:얼마나|몇\s*(?:알|정|개|모금)?|양|용량|수량).{0,24}"
+        r"(?:모르|알\s*수\s*없|확인(?:이|을)?\s*(?:안|못))|"
+        r"(?:모르|알\s*수\s*없|확인(?:이|을)?\s*(?:안|못)).{0,24}"
+        r"(?:얼마나|몇\s*(?:알|정|개|모금)?|양|용량|수량)|"
+        r"\bunknown\s+(?:amount|quantity|dose|number)\b|"
+        r"\b(?:do\s+not|don't|cannot|can't)\s+know\s+how\s+(?:much|many)\b|"
+        r"\bnot\s+sure\s+how\s+(?:much|many)\b|"
+        r"\b(?:amount|quantity|dose|number)\b.{0,12}\b(?:unknown|unclear)\b)"
+    )
+    exposure_action = re.compile(
+        r"(?:삼켰|삼킨|삼키|삼킴|먹었|먹은|먹어|마셨|마신|마셔|섭취|복용|"
+        r"들이마셨|들이마신|흡입|노출|걸렸|박혔|눈에.{0,12}(?:들어|튀)|"
+        r"피부에.{0,12}(?:묻|닿|쏟)|(?:입|코|귀)에.{0,12}넣|"
+        r"\b(?:swallow(?:ed|ing|s)?|ingest(?:ed|ing|s|ion)?|"
+        r"drink(?:ing|s)?|drank|drunk|consume(?:d|s|ing)?|ate|eaten|"
+        r"took|taken|inhal(?:e|ed|es|ing|ation)|breathe[ds]?\s+in|"
+        r"expos(?:e|ed|es|ing|ure)|splash(?:ed|es|ing)?|spill(?:ed|s|ing)?|"
+        r"leak(?:ed|s|ing)?|lodg(?:e|ed|es|ing)|stuck)\b|"
+        r"\bgot\b.{0,20}\b(?:eyes?|skin|mouth)\b|"
+        r"\bput\b.{0,32}\b(?:mouth|nose|ear)\b)"
+    )
+
+    for clause_match in re.finditer(r"[^.!?。！？;\n]+", text):
+        clause = clause_match.group(0)
+        has_hazard = bool(hazard.search(clause))
+        has_unknown_risky_quantity = bool(
+            unknown_quantity.search(clause) and risky_substance.search(clause)
+        )
+        if not (has_hazard or has_unknown_risky_quantity):
+            continue
+        for action_match in exposure_action.finditer(clause):
+            start = clause_match.start() + action_match.start()
+            end = clause_match.start() + action_match.end()
+            if _emergency_span_is_current(text, start, end):
+                return True
+    # Unknown quantity is often supplied in the immediately following sentence
+    # ("I took some pills. I don't know how many."). Preserve that local
+    # relationship without joining unrelated hazards and actions across clauses.
+    for action_match in exposure_action.finditer(text):
+        window = text[max(0, action_match.start() - 96) : action_match.end() + 128]
+        action_clause_start = max(
+            text.rfind(separator, 0, action_match.start())
+            for separator in ".!?。！？;\n"
+        )
+        action_clause_end_candidates = [
+            position
+            for separator in ".!?。！？;\n"
+            if (position := text.find(separator, action_match.end())) >= 0
+        ]
+        action_clause_end = (
+            min(action_clause_end_candidates) if action_clause_end_candidates else len(text)
+        )
+        action_clause = text[action_clause_start + 1 : action_clause_end]
+        if (
+            risky_substance.search(action_clause)
+            and unknown_quantity.search(window)
+            and _emergency_span_is_current(
+                text,
+                action_match.start(),
+                action_match.end(),
+            )
+        ):
             return True
     return False
+
+
+def _emergency_span_is_current(text: str, start: int, end: int) -> bool:
+    """Return whether a matched emergency concept is asserted as current."""
+
+    before = text[max(0, start - 120) : start]
+    after = text[end : end + 160]
+    if re.search(
+        r"(?:기사|뉴스|논문|예시|가상|교육|드라마|문제|퀴즈|만약|가정|혹시)"
+        r".{0,56}$",
+        before,
+    ) or re.search(
+        r"\b(?:if|what\s+if|suppose|assuming|hypothetical(?:ly)?|"
+        r"in\s+a\s+(?:story|case|scenario)|article|news|paper|example|"
+        r"training|fiction|what\s+does|definition\s+of)\b[^.!?\n]{0,80}$",
+        before,
+    ):
+        return False
+    if re.match(
+        r".{0,28}(?:라?면|경우(?:에는|라면)?|때(?:에는)?|"
+        r"(?:을|를)?\s*(?:예방|방지)(?:하|하는|할)?|"
+        r"\bthen\b|\bwhat\s+should\b|"
+        r"\b(?:prevent(?:ed|ing|ion)?|avoid(?:ed|ing|ance)?)\b)",
+        after,
+        re.IGNORECASE,
+    ):
+        return False
+    if re.search(
+        r"(?:[\"“‘][^\"”’]{0,120})$",
+        before,
+    ) and re.match(r"[^\"”’]{0,120}[\"”’]", after):
+        return False
+    if re.match(
+        r".{0,36}(?:(?:라고|라는)\s*(?:표현|문구|인용|문장|말)|"
+        r"뜻|정의|번역|의미|\b(?:phrase|term|quote|sentence|headline|"
+        r"definition|mean(?:s|ing)?|translation)\b)",
+        after,
+        re.IGNORECASE,
+    ):
+        return False
+    if re.search(
+        r"(?:\b(?:did|do|does|am|is|are|was|were|have|has|had)\s+not\b\s*|"
+        r"\b(?:didn't|don't|doesn't|isn't|aren't|wasn't|weren't|haven't|"
+        r"hasn't|hadn't|never)\b\s*|(?:안|전혀)\s*|"
+        r"\b(?:denies|without|no)\b[^.!?\n]{0,40})$",
+        before,
+    ):
+        return False
+    if re.match(
+        r"\s*(?:지(?:는)?\s*(?:않|못)|하지\s*(?:않|못)|아니|없|"
+        r"(?:did|does|do|was|were|is|are|has|have)\s+not\b|"
+        r"(?:didn't|doesn't|isn't|aren't|hasn't|haven't)\b)",
+        after,
+        re.IGNORECASE,
+    ):
+        return False
+
+    remote_history = re.search(
+        r"(?:\d+\s*(?:년|개월)\s*전|오래전|과거|예전|어릴\s*때|작년|"
+        r"\b(?:years?|months?)\s+ago\b|\blast\s+year\b|\bin\s+childhood\b|"
+        r"\bhistory\s+of\b).{0,72}$",
+        before,
+        re.IGNORECASE,
+    )
+    recent_history = re.search(
+        r"(?:어제|지난번|\byesterday\b|\bpreviously\b).{0,72}$",
+        before,
+        re.IGNORECASE,
+    )
+    resolved = re.search(
+        r".{0,100}(?:지금|현재|이제|now|currently).{0,48}"
+        r"(?:괜찮|회복|끝|멈|사라|없|not\s+(?:happening|bleeding|exposed)|"
+        r"no\s+(?:symptoms?|problem)|fine|resolved|stopped)",
+        after,
+        re.IGNORECASE,
+    )
+    return not (remote_history or (recent_history and resolved))
 
 
 def _needs_prior_emergency_context(value: str) -> bool:
