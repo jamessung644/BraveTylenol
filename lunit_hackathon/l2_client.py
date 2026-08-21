@@ -39,7 +39,6 @@ class L2Client:
         self._settings = settings
         self._http_client = http_client
         self._owns_http_client = http_client is None
-        self._deadline: float | None = None
         self.last_usage = TokenUsage()
         self.last_finish_reason: str | None = None
 
@@ -70,7 +69,13 @@ class L2Client:
         if not api_key:
             raise ConfigurationError("LUNIT_FM_API_KEY is required in .env or the environment")
 
-        call_deadline = perf_counter() + timeout_seconds if timeout_seconds is not None else None
+        call_budget = min(
+            timeout_seconds
+            if timeout_seconds is not None
+            else self._settings.request_timeout_seconds,
+            self._settings.request_timeout_seconds,
+        )
+        call_deadline = perf_counter() + call_budget
 
         payload: dict[str, Any] = {
             "model": self._settings.lunit_fm_model,
@@ -191,7 +196,7 @@ class L2Client:
         self,
         payload: Mapping[str, Any],
         api_key: str,
-        call_deadline: float | None,
+        call_deadline: float,
     ) -> httpx.Response:
         client = self._client()
 
@@ -247,12 +252,9 @@ class L2Client:
 
         raise AssertionError("unreachable")
 
-    def _remaining_timeout(self, call_deadline: float | None = None) -> httpx.Timeout:
+    def _remaining_timeout(self, call_deadline: float) -> httpx.Timeout:
         now = perf_counter()
-        if self._deadline is None:
-            self._deadline = now + self._settings.request_timeout_seconds
-        absolute_deadline = min(self._deadline, call_deadline) if call_deadline else self._deadline
-        remaining = absolute_deadline - now
+        remaining = call_deadline - now
         if remaining <= 0:
             raise UpstreamTimeoutError("L2 request deadline exhausted")
         short_timeout = min(5.0, remaining)
