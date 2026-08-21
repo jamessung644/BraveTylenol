@@ -168,11 +168,16 @@ def _answer_issue(content: str | None, retrieval: RetrievalResult | None) -> str
     if _looks_like_tool_protocol(content):
         return "the answer leaked tool protocol"
     actual = set(_actual_cite_uids(retrieval))
-    mentioned = {cite_uid for cite_uid in actual if _contains_exact_cite_uid(content, cite_uid)}
     explicit_values = _explicit_citation_values(content, actual)
-    invented = explicit_values - actual
-    if invented:
-        return f"it included unsupported cite_uid values: {', '.join(sorted(invented))}"
+    invalid_explicit_values = [
+        value for value in explicit_values if value is None or value not in actual
+    ]
+    if invalid_explicit_values:
+        invented = sorted(value for value in invalid_explicit_values if value)
+        if invented:
+            return f"it included unsupported cite_uid values: {', '.join(invented)}"
+        return "it included a malformed cite_uid marker"
+    mentioned = {cite_uid for cite_uid in actual if _contains_exact_cite_uid(content, cite_uid)}
     if actual and not (mentioned & actual):
         return "it omitted all selected cite_uid values"
     return None
@@ -188,55 +193,63 @@ def _contains_exact_cite_uid(content: str, cite_uid: str) -> bool:
     return re.search(pattern, content) is not None
 
 
-def _explicit_citation_values(content: str, actual: set[str]) -> set[str]:
-    values: set[str] = set()
+def _explicit_citation_values(content: str, actual: set[str]) -> list[str | None]:
+    """Return complete explicit-marker payloads, including malformed markers.
+
+    A malformed marker is deliberately retained as ``None`` so a coincidental plain-text
+    occurrence of an allowed UID cannot make the answer pass validation.
+    """
+
+    values: list[str | None] = []
     allowlisted = tuple(sorted(actual, key=len, reverse=True))
     for marker in _EXPLICIT_CITATION_MARKER.finditer(content):
-        remainder = content[marker.end() :]
-        bracketed = marker.group("bracketed") is not None
-        exact = _exact_marked_uid(remainder, bracketed, allowlisted)
-        if exact is not None:
-            values.add(exact)
-            continue
-        payload = _marker_payload(remainder, bracketed)
-        if payload:
-            values.add(payload)
+        start = marker.end()
+        if marker.group("bracketed") is not None:
+            values.append(_bracketed_marker_payload(content, start, allowlisted))
+        elif content[start : start + 1] in {"`", '"', "'"}:
+            values.append(_quoted_marker_payload(content, start))
+        else:
+            values.append(_line_marker_payload(content, start))
     return values
 
 
-def _exact_marked_uid(
-    remainder: str,
-    bracketed: bool,
-    allowlisted: Sequence[str],
+def _bracketed_marker_payload(
+    content: str, start: int, allowlisted: Sequence[str]
 ) -> str | None:
-    if remainder[:1] in {"`", '"', "'"}:
-        quote = remainder[0]
-        end = remainder.find(quote, 1)
-        if end > 0:
-            quoted = remainder[1:end]
-            return quoted if quoted in allowlisted else None
+    """Consume one complete bracketed marker payload, including newline content."""
 
+    remainder = content[start:]
+    # Preserve exact UIDs that themselves contain a closing bracket. The outer closing
+    # delimiter must immediately follow the complete allowlisted UID, so prefixes cannot
+    # be accepted as a valid marker.
     for cite_uid in allowlisted:
-        if not remainder.startswith(cite_uid):
-            continue
-        tail = remainder[len(cite_uid) :]
-        if bracketed and tail.startswith("]"):
+        if remainder.startswith(cite_uid) and remainder[len(cite_uid) :].startswith("]"):
             return cite_uid
-        if not bracketed and (not tail or tail.startswith(("\n", "\r"))):
-            return cite_uid
+
+    depth = 1
+    for offset, character in enumerate(remainder):
+        if character == "[":
+            depth += 1
+        elif character == "]":
+            depth -= 1
+            if depth == 0:
+                return remainder[:offset].strip() or None
     return None
 
 
-def _marker_payload(remainder: str, bracketed: bool) -> str:
-    if remainder[:1] in {"`", '"', "'"}:
-        quote = remainder[0]
-        end = remainder.find(quote, 1)
-        return remainder[1:end].strip() if end > 0 else remainder[1:].strip()
+def _quoted_marker_payload(content: str, start: int) -> str | None:
+    quote = content[start]
+    end = content.find(quote, start + 1)
+    if end < 0:
+        return None
+    return content[start + 1 : end].strip() or None
 
-    line = remainder.splitlines()[0] if remainder else ""
-    if bracketed and "]" in line:
-        return line[: line.rfind("]")].strip()
-    return line.strip()
+
+def _line_marker_payload(content: str, start: int) -> str | None:
+    line_end = content.find("\n", start)
+    if line_end < 0:
+        line_end = len(content)
+    return content[start:line_end].strip() or None
 
 
 def _assistant_message(completion: L2Completion) -> dict[str, Any]:
