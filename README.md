@@ -1,8 +1,8 @@
 # BraveTylenol minimal L2 baseline
 
 평가 서버에서 안정적으로 기동하면서 기본 점수를 얻기 위한 최소 Lunit L2 driver다.
-기존 정적 한국어 baseline의 무의존 HTTP/Docker 구조는 유지하되, 채팅 답변은 반드시
-`Lunit/L2-preview`가 생성하도록 바꿨다.
+기존 정적 한국어 baseline의 무의존 HTTP/Docker 구조는 유지하되, 정상 채팅 경로는
+`Lunit/L2-preview`가 답변을 생성하도록 바꿨다.
 
 ## 선택한 범위
 
@@ -11,10 +11,11 @@ retrieval과 generation의 2단계 구성을 권장하지만 필수로 규정하
 질문은 L2 memory로 직접 답할 수 있다고 설명한다. 따라서 이 baseline은 기본 점수와
 실행 안정성에 필요한 다음 경로만 구현한다.
 
-1. 평가 요청의 Bearer token을 L2 인증에 사용한다. 없으면 `LUNIT_FM_API_KEY`를 사용한다.
+1. Quick Start가 지정한 `LUNIT_FM_API_KEY`를 우선 사용하고, 없으면 평가 요청의 Bearer
+   token을 사용한다. 둘이 다르면 401/403에만 다른 credential을 한 번 시도한다.
 2. 전체 multi-turn history 앞에 짧은 의료 안전 system prompt를 추가한다.
 3. `https://model.hackathon.lunit.io/v1/chat/completions`의 L2를 직접 호출한다.
-4. L2가 생성한 비어 있지 않은 text만 OpenAI-compatible completion으로 반환한다.
+4. L2가 생성한 비어 있지 않은 text를 OpenAI-compatible completion으로 반환한다.
 
 MCP, retrieval planner, citation orchestration, 외부 data source, tool call은 포함하지 않는다.
 공식 L2 가이드상 이 기능들은 더 높은 품질을 위해 유용하지만 기본 동작에는 필수가 아니다.
@@ -40,9 +41,10 @@ MCP, retrieval planner, citation orchestration, 외부 data source, tool call은
 - timeout, HTTP 오류, transport 오류는 내부에서 증폭하지 않고 즉시 degraded
   completion으로 종료한다.
 - 응답 body가 조금씩 도착해 socket timeout을 우회해도 monotonic deadline에서 중단한다.
-- terminal L2 failure에는 Python 의료 문장을 대신 만들지 않고 HTTP 200의 빈
-  completion을 반환한다. 공개 CoEval은 이 sample을 재시도하지 않고 빈 답변으로 계속
-  평가하므로 중첩 재시도가 전체 제출을 다시 8분 동안 막지 않는다.
+- terminal L2 failure에는 원래 정상 종료가 검증된 정적 한국어 baseline을 HTTP 200으로
+  반환한다. 공식 검증 버전에 고정된 LlamaIndex/OpenAI adapter가 빈 문자열을 `None`으로
+  바꿔 endpoint/runner 재시도를 시작하는 실제 동작을 피하고, 한 요청의 장애가 전체
+  제출을 중단하지 않게 한다.
 - 안전한 failure kind와 request ID만 기록하며 질문, API key, upstream 본문은 기록하지
   않는다.
 
@@ -61,7 +63,7 @@ CoEval의 180초보다 충분히 일찍 valid OpenAI response를 끝내 상위 H
 - `model` 생략 및 추가 field 허용
 - `max_tokens`, `max_completion_tokens`, text content parts, `developer` role 지원
 - `stream=true`는 지원하지 않으며 HTTP 400 반환
-- L2 terminal failure는 Python-authored 답변 없이 HTTP 200 empty completion 반환
+- L2 terminal failure는 검증된 비어 있지 않은 baseline completion 반환
 - 지원하는 API 응답에 `X-Request-ID`를 부여하고 SIGTERM에 즉시 정상 종료
 - Python 표준 라이브러리만 사용하므로 Docker build 중 package 설치가 없음
 
@@ -69,7 +71,7 @@ CoEval의 180초보다 충분히 일찍 valid OpenAI response를 끝내 상위 H
 
 | 환경변수 | 기본값 | 설명 |
 | --- | --- | --- |
-| `LUNIT_FM_API_KEY` | 없음 | 로컬 실행용 key; 요청 Bearer가 우선 |
+| `LUNIT_FM_API_KEY` | 없음 | Quick Start의 Model/MCP key; 요청 Bearer보다 우선 |
 
 L2 URL은 `https://model.hackathon.lunit.io/v1/chat/completions`, model은
 `Lunit/L2-preview`, reasoning effort는 `low`, 생성 cap은 4,096 tokens, 요청 budget은
@@ -77,8 +79,19 @@ L2 URL은 `https://model.hackathon.lunit.io/v1/chat/completions`, model은
 
 ## 실행 및 검증
 
+Quick Start처럼 key는 source/image에 넣지 않고 실행 환경으로 전달한다.
+
 ~~~bash
+export LUNIT_FM_API_KEY='발급받은_lunit_키'
 python main.py serve
+~~~
+
+Docker에서는 build가 아니라 container 시작 시 주입한다. `.env`는 `.gitignore`와
+`.dockerignore` 양쪽에서 제외된다.
+
+~~~bash
+docker build -t brave-tylenol-minimal .
+docker run --rm --env-file .env -p 8000:8000 brave-tylenol-minimal
 ~~~
 
 ~~~bash
@@ -97,12 +110,15 @@ docker build -t brave-tylenol-minimal .
 ~~~
 
 단위 테스트는 실제 key나 network 없이 Bearer 전달, multi-turn 보존, 4,096-token cap,
-blank-only recovery, transport/timeout 비증폭, empty-completion degradation, response deadline,
+blank-only recovery, transport/timeout 비증폭, nonempty baseline degradation, response deadline,
 32-way 입력에서 L2 동시성 16 상한, request ID, SIGTERM 종료를 검증한다.
 
 ## 제출 전 주의
 
 이 브랜치는 최소 구현을 검증하기 위한 staging branch다. 공식 제출은
 `lunit/hackathon-submission` branch HEAD의 40자리 SHA를 dashboard에 입력해야 한다.
+장애 시 반환하는 정적 baseline 문장은 전체 평가 중단을 막기 위한 운영상 안전장치이며
+L2가 생성한 출력이 아니다. 따라서 정상 L2 경로에는 적용되지 않지만, 공식 규칙을 엄격히
+해석하면 이 예외 경로에도 준수 위험이 남는다.
 MCP retrieval이 없으므로 최신 guideline, 법률, 의약품 허가·급여처럼 근거 조회가 필요한
 질문의 품질은 제한된다. 기본 안정성을 확인한 다음에만 별도 단계로 retrieval을 추가한다.
