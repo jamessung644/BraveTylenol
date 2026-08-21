@@ -48,9 +48,80 @@ async def test_one_turn_makes_exactly_one_tool_free_low_effort_l2_call():
     assert "tools" not in payload
     assert payload["reasoning_effort"] == "low"
     assert payload["temperature"] == 0.0
-    assert payload["max_tokens"] == 1024
+    assert payload["max_tokens"] == 768
+    assert "at most 120 words" in payload["messages"][0]["content"]
     assert payload["messages"][1:] == history
     assert result["choices"][0]["message"]["content"] == "빠른 답변"
+
+
+@pytest.mark.asyncio
+async def test_emergency_gets_larger_budget_and_urgent_short_prompt():
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "Call emergency services now."}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    driver = FastL2Harness(settings(), http_client=client)
+    await driver.answer(
+        [{"role": "user", "content": "They are unconscious and not breathing normally."}],
+        requested_max_tokens=5000,
+    )
+    await client.aclose()
+
+    payload = json.loads(requests[0].content)
+    assert len(requests) == 1
+    assert payload["max_tokens"] == 1280
+    assert "urgent action first" in payload["messages"][0]["content"]
+    assert "at most 180 words" in payload["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_long_clinical_context_gets_larger_budget():
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "요약 답변"}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    driver = FastL2Harness(settings(), http_client=client)
+    await driver.answer(
+        [{"role": "user", "content": "검사 결과를 해석해 주세요. " + "상세 병력 " * 100}],
+        requested_max_tokens=5000,
+    )
+    await client.aclose()
+
+    assert json.loads(requests[0].content)["max_tokens"] == 1280
+
+
+@pytest.mark.asyncio
+async def test_smaller_client_token_limit_still_wins():
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "짧은 답변"}}]},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    driver = FastL2Harness(settings(), http_client=client)
+    await driver.answer(
+        [{"role": "user", "content": "감기 때 물이 도움이 되나요?"}],
+        requested_max_tokens=600,
+    )
+    await client.aclose()
+
+    assert json.loads(requests[0].content)["max_tokens"] == 600
 
 
 @pytest.mark.asyncio
