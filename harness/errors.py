@@ -20,3 +20,7 @@ class MalformedUpstreamResponseError(UpstreamResponseError):
 
 class RetrievalError(Exception):
     """Medical evidence retrieval failed."""
+
+    def __init__(self, message: str, *, code: str = "retrieval_failed") -> None:
+        super().__init__(message)
+        self.code = code

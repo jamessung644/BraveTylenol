@@ -17,23 +17,50 @@ bake it into an image, or pass it as a Docker build argument.
 | `LUNIT_FM_MODEL` | No | `Lunit/L2-preview` | L2 model identifier. |
 | `LUNIT_MCP_URL` | No | `https://mcp.hackathon.lunit.io/mcp` | Contest MCP endpoint used in `rag` mode. |
 | `HARNESS_MODE` | No | `rag` | `rag` enables MCP retrieval; `passthrough` calls L2 directly. |
+| `HARNESS_LOG_LEVEL` | No | `INFO` | Safe harness diagnostics without prompts, evidence, or credentials. |
 | `MAX_TOOL_CALLS` | No | `4` | Maximum MCP tool-call rounds in RAG mode. |
+| `L2_MAX_ATTEMPTS` | No | `3` | Maximum attempts for retryable L2 HTTP responses. |
 | `UPSTREAM_TIMEOUT_SECONDS` | No | `150` | Deadline for the complete chat request (including RAG), in seconds. |
 | `MAX_TOOL_RESULT_CHARS` | No | `12000` | Per-tool-result truncation limit. |
 | `MAX_EVIDENCE_CHARS` | No | `32000` | Total retrieved-evidence truncation limit. |
 
 ## Local development
 
-Python 3.13 is the target runtime.
+Python 3.13 is the target runtime. The repository includes an idempotent
+bootstrap command: it creates `.venv` when needed and only reinstalls
+dependencies when the selected requirements file changes.
 
 ```bash
-python3.13 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt -r requirements-dev.txt
-.venv/bin/pytest -q
-.venv/bin/ruff check app.py harness tests
-.venv/bin/python -m compileall -q app.py harness
-test -n "$LUNIT_FM_API_KEY" && .venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000
+make setup
+make check
+make run
 ```
+
+`make run` starts successfully without a credential so readiness can be
+checked; chat requests return 503 until `LUNIT_FM_API_KEY` is configured.
+For local values, copy `.env.example` to the ignored `.env` file and fill in
+the credential, or export variables in the current shell. The Makefile loads
+simple `KEY=value` entries from `.env` when it exists.
+
+The commands are configurable without editing repository files:
+
+```bash
+# Use a specific interpreter or an isolated environment name.
+PYTHON=/opt/homebrew/bin/python3.13 VENV=.venv-l2 make setup
+
+# Install runtime-only dependencies instead of developer tooling.
+PROFILE=runtime make setup
+
+# Change the listener or enable Uvicorn reload during development.
+PORT=8080 make run UVICORN_ARGS=--reload
+
+# Work interactively with the environment activated in a child shell.
+make shell
+```
+
+Run `make help` for the complete command list. If Python 3.13 is not present
+on macOS, install it with `brew install python@3.13`; `.python-version` also
+advertises the required interpreter to compatible version managers.
 
 ## Docker
 

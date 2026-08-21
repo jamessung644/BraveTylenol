@@ -64,6 +64,20 @@ async def test_complete_parses_assistant_tool_calls(settings_with_key):
     assert result.tool_calls[0].function.arguments == '{"query": "혈압"}'
 
 
+async def test_complete_accumulates_usage_across_rag_calls(settings_with_key):
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=completion_payload({"role": "assistant", "content": "응답"}))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = L2Client(settings_with_key, http_client=http_client)
+        await client.complete(messages=[{"role": "user", "content": "첫 호출"}])
+        await client.complete(messages=[{"role": "user", "content": "두 번째 호출"}])
+
+    assert client.last_usage.prompt_tokens == 20
+    assert client.last_usage.completion_tokens == 8
+    assert client.last_usage.total_tokens == 28
+
+
 async def test_complete_retries_retryable_response_once(settings_with_key, monkeypatch):
     attempts = 0
     sleeps = []
@@ -85,6 +99,29 @@ async def test_complete_retries_retryable_response_once(settings_with_key, monke
     assert result.content == "재시도 성공"
     assert attempts == 2
     assert sleeps == [0.25]
+
+
+async def test_complete_can_retry_two_consecutive_gateway_failures(settings_with_key, monkeypatch):
+    attempts = 0
+    sleeps = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return httpx.Response(502, json={"error": {"type": "gateway"}})
+        return httpx.Response(200, json=completion_payload({"role": "assistant", "content": "복구"}))
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("harness.l2_client.asyncio.sleep", fake_sleep)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        result = await L2Client(settings_with_key, http_client=http_client).complete(messages=[{"role": "user", "content": "질문"}])
+
+    assert result.content == "복구"
+    assert attempts == 3
+    assert sleeps == [0.25, 0.5]
 
 
 async def test_complete_does_not_retry_non_retryable_response(settings_with_key):

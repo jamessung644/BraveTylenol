@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 import uuid
 from collections.abc import Sequence
@@ -43,6 +44,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
+        _configure_harness_logging(resolved_settings.log_level)
         application.state.l2_http_client = httpx.AsyncClient()
         try:
             yield
@@ -105,6 +107,16 @@ def create_app(
         )
 
     return application
+
+
+def _configure_harness_logging(level: str) -> None:
+    harness_logger = logging.getLogger("harness")
+    harness_logger.setLevel(level)
+    if not harness_logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
+        harness_logger.addHandler(handler)
+    harness_logger.propagate = True
 
 
 app = create_app()

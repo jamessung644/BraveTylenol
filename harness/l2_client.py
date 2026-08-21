@@ -1,6 +1,8 @@
 import asyncio
 import json
+import logging
 import re
+import time
 from collections.abc import Mapping, Sequence
 from typing import Any, ClassVar, Self
 
@@ -16,6 +18,9 @@ from harness.errors import (
     UpstreamTransportError,
 )
 from harness.schemas import ChatMessage, L2Completion, TokenUsage
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 
 class L2Client:
@@ -59,9 +64,23 @@ class L2Client:
         if tool_choice is not None:
             payload["tool_choice"] = tool_choice
 
+        started = time.monotonic()
         response = await self._post_completion(payload)
-        completion = self._parse_completion(response)
-        self.last_usage = completion.usage
+        try:
+            completion = self._parse_completion(response)
+        except MalformedUpstreamResponseError as error:
+            logger.warning("l2 parse_failure error_type=%s", type(error).__name__)
+            raise
+        self.last_usage = _sum_usage(self.last_usage, completion.usage)
+        logger.info(
+            "l2 completion duration_ms=%d prompt_tokens=%d completion_tokens=%d tool_count=%d returned_tool_calls=%d accumulated_tokens=%d",
+            round((time.monotonic() - started) * 1_000),
+            completion.usage.prompt_tokens,
+            completion.usage.completion_tokens,
+            len(tools or []),
+            len(completion.tool_calls),
+            self.last_usage.total_tokens,
+        )
         return completion
 
     async def _post_completion(self, payload: Mapping[str, Any]) -> httpx.Response:
@@ -70,19 +89,37 @@ class L2Client:
         headers = {"Authorization": f"Bearer {self._settings.api_key}"}
         timeout = httpx.Timeout(self._settings.upstream_timeout_seconds)
 
-        for attempt in range(2):
+        for attempt in range(self._settings.l2_max_attempts):
             try:
                 response = await client.post(url, json=payload, headers=headers, timeout=timeout)
             except httpx.TimeoutException as error:
+                logger.warning("l2 request_failure error_type=timeout")
                 raise UpstreamTimeoutError("The upstream model request timed out") from error
             except httpx.TransportError as error:
+                logger.warning("l2 request_failure error_type=transport")
                 raise UpstreamTransportError("The upstream model could not be reached") from error
 
-            if response.status_code in self._RETRYABLE_STATUS_CODES and attempt == 0:
-                await asyncio.sleep(0.25)
+            if response.status_code in self._RETRYABLE_STATUS_CODES and attempt < self._settings.l2_max_attempts - 1:
+                logger.info(
+                    "l2 retry status=%d attempt=%d max_attempts=%d",
+                    response.status_code,
+                    attempt + 1,
+                    self._settings.l2_max_attempts,
+                )
+                await asyncio.sleep(0.25 * (2**attempt))
                 continue
             if response.is_error:
-                raise UpstreamResponseError(self._response_error_message(response))
+                message = self._response_error_message(response)
+                logger.warning(
+                    "l2 request_failure error_type=response detail=%s attempt=%d max_attempts=%d message_count=%d tool_count=%d payload_chars=%d",
+                    message,
+                    attempt + 1,
+                    self._settings.l2_max_attempts,
+                    len(payload.get("messages", [])),
+                    len(payload.get("tools", [])),
+                    len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"))),
+                )
+                raise UpstreamResponseError(message)
             return response
 
         raise AssertionError("unreachable")
@@ -132,3 +169,11 @@ class L2Client:
         if not (completion.content and completion.content.strip()) and not completion.tool_calls:
             raise MalformedUpstreamResponseError("Upstream model returned no content or tool calls")
         return completion
+
+
+def _sum_usage(left: TokenUsage, right: TokenUsage) -> TokenUsage:
+    return TokenUsage(
+        prompt_tokens=left.prompt_tokens + right.prompt_tokens,
+        completion_tokens=left.completion_tokens + right.completion_tokens,
+        total_tokens=left.total_tokens + right.total_tokens,
+    )

@@ -54,6 +54,75 @@ async def test_generation_returns_direct_l2_content_without_retrieval():
     assert l2.calls[0]["tool_choice"] == "auto"
 
 
+async def test_generation_forces_retrieval_for_explicit_official_source_request():
+    l2 = ScriptedL2Client([
+        L2Completion(tool_calls=[tool_call("r1", "retrieve_relevant_content", {"query": "KCD-8 I10 공식 질병명"})]),
+        L2Completion(content="근거 답변"),
+    ])
+
+    await GenerationEngine(l2, FakeRetrievalEngine()).answer([
+        ChatMessage(role="user", content="KCD-8 I10의 공식 근거 식별자를 알려주세요.")
+    ])
+
+    assert l2.calls[0]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "retrieve_relevant_content"},
+    }
+
+
+async def test_generation_adds_late_plain_emergency_instruction():
+    l2 = ScriptedL2Client([])
+
+    answer = await GenerationEngine(l2, FakeRetrievalEngine()).answer([
+        ChatMessage(role="user", content="숨쉬기 어렵고 침도 삼키기 힘들어요.")
+    ])
+
+    assert answer.startswith("즉시 119에 전화")
+    assert "혼자 운전하지 마십시오" in answer
+    assert l2.calls == []
+
+
+async def test_generation_renders_kcd_evidence_without_a_second_model_call():
+    l2 = ScriptedL2Client([
+        L2Completion(tool_calls=[tool_call("r1", "retrieve_relevant_content", {"query": "KCD-8 I10"})]),
+    ])
+    retrieval = FakeRetrievalEngine(RetrievalResult(
+        status="sufficient",
+        items=[EvidenceItem(
+            cite_uid="kcd:1",
+            relevance_score=1,
+            source_tool="kcd_get_name",
+            content=json.dumps({
+                "code": "I10",
+                "revision": "KCD-8",
+                "kor": {"headword": "본태성(원발성) 고혈압", "subheadings": ["고혈압"]},
+                "eng": {"headword": "Essential(primary) hypertension", "subheadings": []},
+                "source_version": "KCD-8 DB Masterfile",
+            }, ensure_ascii=False),
+        )],
+    ))
+
+    answer = await GenerationEngine(l2, retrieval).answer([
+        ChatMessage(role="user", content="KCD-8 I10 관계를 알려주세요.")
+    ])
+
+    assert "| I10 | 본태성(원발성) 고혈압 | Essential(primary) hypertension | KCD-8 | `kcd:1` |" in answer
+    assert "I10 세부표시: 고혈압" in answer
+    assert "한 코드가 다른 코드를 포함하거나 배제한다고 단정할 수 없습니다" in answer
+    assert len(l2.calls) == 1
+
+
+async def test_generation_does_not_use_airway_template_for_unrelated_emergency():
+    l2 = ScriptedL2Client([L2Completion(content="흉통 응답")])
+
+    answer = await GenerationEngine(l2, FakeRetrievalEngine()).answer([
+        ChatMessage(role="user", content="심한 흉통이 있어요.")
+    ])
+
+    assert answer == "흉통 응답"
+    assert len(l2.calls) == 1
+
+
 async def test_generation_feeds_retrieval_result_back_to_l2():
     l2 = ScriptedL2Client([
         L2Completion(tool_calls=[tool_call("r1", "retrieve_relevant_content", {"query": "한국 고혈압 진료지침 목표 혈압"})]),
@@ -69,13 +138,17 @@ async def test_generation_feeds_retrieval_result_back_to_l2():
 
     assert answer == "근거를 반영한 최종 답변입니다."
     assert retrieval.queries == ["한국 고혈압 진료지침 목표 혈압"]
-    assert l2.calls[1]["messages"][-1]["role"] == "tool"
-    assert l2.calls[1]["messages"][-1]["tool_call_id"] == "r1"
-    assert json.loads(l2.calls[1]["messages"][-1]["content"]) == {
+    assert l2.calls[1]["messages"][-2]["role"] == "tool"
+    assert l2.calls[1]["messages"][-2]["tool_call_id"] == "r1"
+    assert json.loads(l2.calls[1]["messages"][-2]["content"]) == {
         "items": [{"cite_uid": "g:1", "content": "근거", "relevance_score": 0.9, "source_tool": "index_get_page_content"}],
         "note": "지침 확인",
         "status": "sufficient",
     }
+    assert l2.calls[1]["messages"][-1]["role"] == "system"
+    assert "g:1" in l2.calls[1]["messages"][-1]["content"]
+    assert "Include every cite_uid" in l2.calls[1]["messages"][-1]["content"]
+    assert "simultaneous-coding advice" in l2.calls[1]["messages"][-1]["content"]
     assert "tools" not in l2.calls[1]
 
 

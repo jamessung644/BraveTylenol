@@ -223,14 +223,75 @@ async def test_retrieval_normalizes_duplicate_scores_and_total_evidence_limit(se
     assert [(item.cite_uid, item.relevance_score) for item in result.items] == [("a", 0.9), ("b", 0.2)]
 
 
-async def test_retrieval_budget_is_hard_cap_and_returns_discovery_order(settings_with_key):
-    l2 = ScriptedL2Client([L2Completion(tool_calls=[tool_call(str(i), "lookup", {"n": i}) for i in range(5)])])
+async def test_retrieval_budget_is_hard_cap_and_forces_evidence_selection(settings_with_key):
+    l2 = ScriptedL2Client([
+        L2Completion(tool_calls=[tool_call(str(i), "lookup", {"n": i}) for i in range(5)]),
+        L2Completion(tool_calls=[tool_call("final", "finalize_retrieval", {
+            "status": "sufficient",
+            "items": [{"cite_uid": "same", "relevance_score": 1}],
+            "note": "selected after budget exhaustion",
+        })]),
+    ])
     mcp = FakeMCPClient([tool()], {"lookup": MCPCallResult(content='{"cite_uid":"same"}')})
     result = await RetrievalEngine(l2, mcp, settings_with_key).retrieve("query")
     assert len(mcp.calls) == 4
-    assert result.status == "partial"
-    assert result.note == "MCP tool-call budget exhausted before finalization."
+    assert result.status == "sufficient"
+    assert result.note == "selected after budget exhaustion"
     assert [item.cite_uid for item in result.items] == ["same"]
+    assert [item["function"]["name"] for item in l2.calls[1]["tools"]] == ["finalize_retrieval"]
+    assert l2.calls[1]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "finalize_retrieval"},
+    }
+
+
+async def test_retrieval_keeps_only_the_selected_citation_fragment(settings_with_key):
+    l2 = ScriptedL2Client([
+        L2Completion(tool_calls=[tool_call("call", "lookup", {})]),
+        L2Completion(tool_calls=[tool_call("final", "finalize_retrieval", {
+            "status": "sufficient",
+            "items": [{"cite_uid": "b", "relevance_score": 1}],
+            "note": "selected b",
+        })]),
+    ])
+    full_content = '[{"cite_uid":"a","text":"A"},{"cite_uid":"b","text":"B"}]'
+    mcp = FakeMCPClient([tool()], {
+        "lookup": MCPCallResult(
+            content=full_content,
+            cite_uids=["a", "b"],
+            citation_contents={
+                "a": '{"cite_uid":"a","text":"A"}',
+                "b": '{"cite_uid":"b","text":"B"}',
+            },
+        )
+    })
+
+    result = await RetrievalEngine(l2, mcp, settings_with_key).retrieve("query")
+
+    assert [item.cite_uid for item in result.items] == ["b"]
+    assert json.loads(result.items[0].content) == {"cite_uid": "b", "text": "B"}
+
+
+async def test_retrieval_rejects_duplicate_tool_call_without_spending_budget(settings_with_key):
+    repeated = tool_call("repeat", "lookup", {"query": "same"})
+    l2 = ScriptedL2Client([
+        L2Completion(tool_calls=[tool_call("first", "lookup", {"query": "same"})]),
+        L2Completion(tool_calls=[repeated]),
+        L2Completion(tool_calls=[tool_call("final", "finalize_retrieval", {
+            "status": "sufficient",
+            "items": [{"cite_uid": "kept", "relevance_score": 1}],
+            "note": "done",
+        })]),
+    ])
+    mcp = FakeMCPClient([tool()], {"lookup": MCPCallResult(content='{"cite_uid":"kept"}')})
+
+    result = await RetrievalEngine(l2, mcp, settings_with_key).retrieve("query")
+
+    assert mcp.calls == [("lookup", {"query": "same"})]
+    assert result.status == "sufficient"
+    assert result.items[0].cite_uid == "kept"
+    duplicate_messages = [message.content for message in l2.calls[2]["messages"] if message.role == "tool"]
+    assert any("duplicate tool call" in content for content in duplicate_messages)
 
 
 async def test_retrieval_rejects_finalize_name_collision(settings_with_key):
@@ -238,6 +299,64 @@ async def test_retrieval_rejects_finalize_name_collision(settings_with_key):
     mcp = FakeMCPClient([tool("finalize_retrieval")], {})
     with pytest.raises(RetrievalError, match="collision"):
         await RetrievalEngine(l2, mcp, settings_with_key).retrieve("query")
+
+
+async def test_retrieval_routes_kcd_query_to_small_relevant_tool_set(settings_with_key):
+    l2 = ScriptedL2Client([
+        L2Completion(tool_calls=[tool_call("final", "finalize_retrieval", {
+            "status": "no_evidence",
+            "items": [],
+            "note": "done",
+        })]),
+    ])
+    tools = [
+        tool("kcd_get_name"),
+        tool("kcd_search_codes"),
+        tool("openapi_hira_disease_check_code"),
+        tool("openapi_law_search"),
+        tool("index_keyword_search"),
+    ]
+
+    await RetrievalEngine(l2, FakeMCPClient(tools, {}), settings_with_key).retrieve("KCD-8 I10 질병 코드 이름")
+
+    sent_names = [item["function"]["name"] for item in l2.calls[0]["tools"]]
+    assert sent_names == [
+        "kcd_get_name",
+        "kcd_search_codes",
+        "openapi_hira_disease_check_code",
+        "finalize_retrieval",
+    ]
+
+
+async def test_retrieval_enforces_requested_kcd_revision(settings_with_key):
+    l2 = ScriptedL2Client([
+        L2Completion(tool_calls=[tool_call("lookup", "kcd_get_name", {
+            "code": "I10",
+            "revision": "KCD-9",
+        })]),
+        L2Completion(tool_calls=[tool_call("final", "finalize_retrieval", {
+            "status": "no_evidence",
+            "items": [],
+            "note": "done",
+        })]),
+    ])
+    mcp = FakeMCPClient(
+        [MCPTool(
+            name="kcd_get_name",
+            description="lookup",
+            input_schema={
+                "type": "object",
+                "properties": {"code": {"type": "string"}, "revision": {"type": "string"}},
+                "required": ["code"],
+                "additionalProperties": False,
+            },
+        )],
+        {"kcd_get_name": MCPCallResult(content="{}")},
+    )
+
+    await RetrievalEngine(l2, mcp, settings_with_key).retrieve("KCD-8 I10 공식 명칭")
+
+    assert mcp.calls == [("kcd_get_name", {"code": "I10", "revision": "KCD-8"})]
 
 
 async def test_retrieval_caps_each_tool_result_before_returning_evidence(settings_with_key, monkeypatch):
@@ -249,8 +368,10 @@ async def test_retrieval_caps_each_tool_result_before_returning_evidence(setting
     ])
     content = json.dumps({"cite_uid": "long", "text": "x" * 2_000})
     result = await RetrievalEngine(l2, FakeMCPClient([tool()], {"lookup": MCPCallResult(content=content)}), settings).retrieve("query")
-    assert len(result.items[0].content) == 1_000
-    assert result.items[0].content.endswith("...[truncated]")
+    assert len(result.items[0].content) <= 1_000
+    bounded = json.loads(result.items[0].content)
+    assert bounded["truncated"] is True
+    assert bounded["cite_uids"] == ["long"]
 
 
 async def test_retrieval_caps_total_selected_evidence(settings_with_key, monkeypatch):

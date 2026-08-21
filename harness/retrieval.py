@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from collections.abc import Mapping
 from typing import Any
 
@@ -8,7 +9,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from harness.config import Settings
 from harness.errors import RetrievalError
-from harness.mcp_client import MCPClientProtocol
+from harness.mcp_client import MCPClientProtocol, bound_mcp_content, collect_cite_uids
 from harness.prompts import FINALIZE_RETRIEVAL_TOOL, RETRIEVAL_SYSTEM_PROMPT
 from harness.schemas import (
     ChatMessage,
@@ -17,6 +18,9 @@ from harness.schemas import (
     RetrievalResult,
     ToolCall,
 )
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 
 class _FinalItem(BaseModel):
@@ -44,21 +48,39 @@ class RetrievalEngine:
         ]
         calls_used = 0
         planner_turns = 0
+        seen_calls: set[str] = set()
         async with self._mcp.connect() as connection:
             discovered = await connection.list_tools()
             if any(tool.name == "finalize_retrieval" for tool in discovered):
-                raise RetrievalError("MCP tool name collision: finalize_retrieval")
+                raise RetrievalError("MCP tool name collision: finalize_retrieval", code="mcp_tool_name_collision")
             tool_map = {tool.name: tool for tool in discovered}
             for tool in discovered:
                 _validate_schema(tool.input_schema)
-            tools = [tool.as_openai_tool() for tool in discovered] + [FINALIZE_RETRIEVAL_TOOL]
+            selected_tools = _select_tools(query, discovered)
+            tools = [tool.as_openai_tool() for tool in selected_tools] + [FINALIZE_RETRIEVAL_TOOL]
+            selected_names = {tool.name for tool in selected_tools}
+            tool_map = {name: tool for name, tool in tool_map.items() if name in selected_names}
+            logger.info(
+                "retrieval discovery available_tools=%d selected_tools=%d",
+                len(discovered),
+                len(selected_tools),
+            )
             max_planner_turns = self._settings.max_tool_calls + 2
             while planner_turns < max_planner_turns:
-                completion: L2Completion = await self._l2.complete(messages=messages, tools=tools, tool_choice="auto")
+                budget_exhausted = calls_used >= self._settings.max_tool_calls
+                planner_tools = [FINALIZE_RETRIEVAL_TOOL] if budget_exhausted else tools
+                tool_choice: str | dict[str, Any] = "auto"
+                if budget_exhausted:
+                    tool_choice = {"type": "function", "function": {"name": "finalize_retrieval"}}
+                completion: L2Completion = await self._l2.complete(
+                    messages=messages,
+                    tools=planner_tools,
+                    tool_choice=tool_choice,
+                )
                 planner_turns += 1
                 messages.append(ChatMessage(role="assistant", content=completion.content, tool_calls=completion.tool_calls))
                 if not completion.tool_calls:
-                    raise RetrievalError("Retrieval planner returned no tool calls")
+                    raise RetrievalError("Retrieval planner returned no tool calls", code="retrieval_planner_no_tool_calls")
                 finalization: _Finalization | None = None
                 valid: list[tuple[ToolCall, dict[str, Any]]] = []
                 errors: list[tuple[ToolCall, str]] = []
@@ -68,49 +90,80 @@ class RetrievalEngine:
                         finalization = self._parse_finalization(call)
                         continue
                     arguments, error = _parse_arguments(call.function.arguments)
+                    if error is None and call.function.name in tool_map:
+                        arguments = _apply_query_constraints(query, call.function.name, arguments)
                     if error:
                         errors.append((call, error))
                     elif call.function.name not in tool_map:
                         errors.append((call, "unknown tool"))
                     elif not _arguments_match_schema(arguments, tool_map[call.function.name].input_schema):
                         errors.append((call, "arguments do not match tool schema"))
+                    elif _call_signature(call.function.name, arguments) in seen_calls:
+                        errors.append((call, "duplicate tool call; use the previous result or finalize retrieval"))
                     elif len(valid) >= remaining:
                         errors.append((call, "tool-call budget exhausted"))
                     else:
+                        seen_calls.add(_call_signature(call.function.name, arguments))
                         valid.append((call, arguments))
                 calls_used += len(valid)
                 for call, error in errors:
                     messages.append(_tool_error(call, error))
                 results = await asyncio.gather(*(self._call(connection, call, arguments) for call, arguments in valid))
-                for call, (result, cite_uids) in zip((call for call, _ in valid), results, strict=True):
+                for call, (result, cite_uids, citation_contents) in zip(
+                    (call for call, _ in valid),
+                    results,
+                    strict=True,
+                ):
+                    logger.info(
+                        "retrieval tool_result name=%s citation_count=%d",
+                        call.function.name,
+                        len(cite_uids),
+                    )
                     messages.append(ChatMessage(role="tool", tool_call_id=call.id, content=result))
                     for cite_uid in cite_uids:
-                        candidates.setdefault(cite_uid, (call.function.name, result))
+                        candidates.setdefault(
+                            cite_uid,
+                            (call.function.name, citation_contents.get(cite_uid, result)),
+                        )
                 if finalization is not None:
-                    return self._resolve(finalization, candidates)
-                if calls_used >= self._settings.max_tool_calls:
-                    return self._partial(candidates)
-        return self._partial(candidates, note="Retrieval planner turn limit exhausted before finalization.")
+                    resolved = self._resolve(finalization, candidates)
+                    _log_completion(resolved, calls_used, planner_turns)
+                    return resolved
+        partial = self._partial(candidates, note="Retrieval planner turn limit exhausted before finalization.")
+        _log_completion(partial, calls_used, planner_turns)
+        return partial
 
-    async def _call(self, connection: Any, call: ToolCall, arguments: dict[str, Any]) -> tuple[str, list[str]]:
+    async def _call(
+        self,
+        connection: Any,
+        call: ToolCall,
+        arguments: dict[str, Any],
+    ) -> tuple[str, list[str], dict[str, str]]:
         try:
             result = await connection.call_tool(call.function.name, arguments)
             if result.is_error:
-                return _error_content("MCP tool returned an error"), []
-            return _truncate(result.content, self._settings.max_tool_result_chars), _cite_uids(result.content)
+                return _error_content("MCP tool returned an error"), [], {}
+            cite_uids = result.cite_uids or collect_cite_uids(result.content)
+            content = bound_mcp_content(result.content, self._settings.max_tool_result_chars, cite_uids)
+            citation_contents = {
+                cite_uid: bound_mcp_content(fragment, self._settings.max_tool_result_chars, [cite_uid])
+                for cite_uid, fragment in result.citation_contents.items()
+                if cite_uid in cite_uids
+            }
+            return content, cite_uids, citation_contents
         except RetrievalError:
-            return _error_content("MCP tool call failed"), []
+            return _error_content("MCP tool call failed"), [], {}
 
     def _parse_finalization(self, call: ToolCall) -> _Finalization:
         arguments, error = _parse_arguments(call.function.arguments)
         if error:
-            raise RetrievalError(f"Invalid finalize_retrieval arguments: {error}")
+            raise RetrievalError(f"Invalid finalize_retrieval arguments: {error}", code="retrieval_finalize_invalid")
         try:
             finalization = _Finalization.model_validate(arguments)
         except ValidationError as error:
-            raise RetrievalError("Invalid finalize_retrieval arguments") from error
+            raise RetrievalError("Invalid finalize_retrieval arguments", code="retrieval_finalize_invalid") from error
         if finalization.status not in {"sufficient", "partial", "no_evidence"}:
-            raise RetrievalError("Invalid finalize_retrieval status")
+            raise RetrievalError("Invalid finalize_retrieval status", code="retrieval_finalize_invalid")
         return finalization
 
     def _resolve(self, finalization: _Finalization, candidates: Mapping[str, tuple[str, str]]) -> RetrievalResult:
@@ -159,12 +212,84 @@ def _validate_schema(schema: dict[str, Any]) -> None:
     try:
         validators.validator_for(schema).check_schema(schema)
     except SchemaError as error:
-        raise RetrievalError("MCP tool schema is invalid") from error
+        raise RetrievalError("MCP tool schema is invalid", code="mcp_schema_invalid") from error
 
 
 def _arguments_match_schema(arguments: dict[str, Any], schema: dict[str, Any]) -> bool:
     validator = validators.validator_for(schema)(schema)
     return not any(validator.iter_errors(arguments))
+
+
+def _call_signature(name: str, arguments: dict[str, Any]) -> str:
+    return json.dumps({"arguments": arguments, "name": name}, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _apply_query_constraints(query: str, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    if tool_name not in {"kcd_get_name", "kcd_search_codes"}:
+        return arguments
+    normalized = query.casefold().replace(" ", "")
+    revision: str | None = None
+    if "kcd-8" in normalized or "kcd8" in normalized:
+        revision = "KCD-8"
+    elif "kcd-9" in normalized or "kcd9" in normalized:
+        revision = "KCD-9"
+    if revision is None:
+        return arguments
+    return {**arguments, "revision": revision}
+
+
+def _select_tools(query: str, discovered: list[Any]) -> list[Any]:
+    normalized = query.casefold()
+    selected_names: set[str] = set()
+
+    def includes_any(markers: tuple[str, ...]) -> bool:
+        return any(marker in normalized for marker in markers)
+
+    if includes_any(("kcd", "질병분류", "질병 코드", "상병 코드")):
+        selected_names.update({"kcd_get_name", "kcd_search_codes", "openapi_hira_disease_check_code"})
+    if includes_any(("의약품", "약물", "약가", "성분", "효능", "부작용", "복용", "투여", "허가", "drug", "타이레놀")):
+        selected_names.update(
+            {
+                "adr_retrieve_drug_info",
+                "openapi_hira_get_drug_price",
+                "openapi_mfds_check_drug_permission",
+                "openapi_mfds_find_drugs_by_ingredient",
+                "openapi_mfds_get_drug_indication",
+            }
+        )
+    if includes_any(("보험", "급여", "심평원", "hira", "수가", "요양")):
+        selected_names.update(
+            {
+                "hira_updates_search",
+                "openapi_hira_disease_check_code",
+                "openapi_hira_get_drug_price",
+            }
+        )
+    if includes_any(("법", "법령", "조문", "의료법")):
+        selected_names.update({"openapi_law_get_article", "openapi_law_list_articles", "openapi_law_search"})
+    if includes_any(("지침", "권고", "가이드라인", "guideline", "문서", "페이지")):
+        selected_names.update(tool.name for tool in discovered if tool.name.startswith("index_"))
+    if includes_any(("논문", "연구", "pubmed", "pmc")):
+        selected_names.update(
+            {
+                "rag_get_all_data_sources",
+                "rag_get_data_source_detail",
+                "rag_vector_query",
+            }
+        )
+
+    selected = [tool for tool in discovered if tool.name in selected_names]
+    return selected or discovered
+
+
+def _log_completion(result: RetrievalResult, calls_used: int, planner_turns: int) -> None:
+    logger.info(
+        "retrieval complete status=%s evidence_items=%d tool_calls=%d planner_turns=%d",
+        result.status,
+        len(result.items),
+        calls_used,
+        planner_turns,
+    )
 
 
 def _tool_error(call: ToolCall, message: str) -> ChatMessage:
@@ -173,27 +298,6 @@ def _tool_error(call: ToolCall, message: str) -> ChatMessage:
 
 def _error_content(message: str) -> str:
     return json.dumps({"error": message}, ensure_ascii=False, separators=(",", ":"))
-
-
-def _cite_uids(content: str) -> list[str]:
-    try:
-        payload = json.loads(content)
-    except (TypeError, json.JSONDecodeError):
-        return []
-    found: list[str] = []
-
-    def visit(value: Any) -> None:
-        if isinstance(value, dict):
-            for key, item in value.items():
-                if key == "cite_uid" and isinstance(item, str):
-                    found.append(item)
-                visit(item)
-        elif isinstance(value, list):
-            for item in value:
-                visit(item)
-
-    visit(payload)
-    return found
 
 
 def _truncate(value: str, maximum: int) -> str:

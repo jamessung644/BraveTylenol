@@ -1,11 +1,11 @@
 """Request-scoped coordination of direct and retrieval-augmented answers."""
 
 import logging
-import uuid
 from collections.abc import Sequence
 from typing import Any, Literal
 
 from harness.errors import MalformedUpstreamResponseError, RetrievalError
+from harness.prompts import GENERATION_SYSTEM_PROMPT
 from harness.schemas import ChatMessage, TokenUsage
 
 logger = logging.getLogger(__name__)
@@ -30,18 +30,20 @@ class ChatOrchestrator:
             answer = await self._generation.answer(messages)
         except RetrievalError as error:
             logger.warning(
-                "retrieval fallback request_id=%s error_type=%s",
-                uuid.uuid4(),
-                type(error).__name__,
+                "retrieval fallback error_code=%s",
+                error.code,
             )
-            return await self._direct(messages)
+            return await self._direct(messages, system_prompt=GENERATION_SYSTEM_PROMPT)
 
         self.last_usage = getattr(self._l2, "last_usage", TokenUsage())
         return _required_content(answer)
 
-    async def _direct(self, messages: Sequence[ChatMessage]) -> str:
-        completion = await self._l2.complete(messages=messages)
-        self.last_usage = completion.usage
+    async def _direct(self, messages: Sequence[ChatMessage], *, system_prompt: str | None = None) -> str:
+        active_messages = list(messages)
+        if system_prompt is not None:
+            active_messages.insert(0, ChatMessage(role="system", content=system_prompt))
+        completion = await self._l2.complete(messages=active_messages)
+        self.last_usage = getattr(self._l2, "last_usage", completion.usage)
         return _required_content(completion.content)
 
 

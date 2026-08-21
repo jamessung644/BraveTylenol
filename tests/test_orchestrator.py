@@ -5,6 +5,7 @@ import pytest
 
 from harness.errors import RetrievalError, UpstreamTimeoutError
 from harness.orchestrator import ChatOrchestrator
+from harness.prompts import GENERATION_SYSTEM_PROMPT
 from harness.schemas import ChatMessage, L2Completion
 
 
@@ -66,7 +67,9 @@ async def test_rag_retrieval_error_retries_original_conversation_directly():
 
     assert answer == "폴백 답변"
     assert generation.calls == [messages]
-    assert l2.calls == [{"messages": messages}]
+    fallback_messages = l2.calls[0]["messages"]
+    assert fallback_messages[0] == ChatMessage(role="system", content=GENERATION_SYSTEM_PROMPT)
+    assert fallback_messages[1:] == messages
 
 
 async def test_retrieval_fallback_log_does_not_include_request_or_error_contents(caplog):
@@ -80,6 +83,7 @@ async def test_retrieval_fallback_log_does_not_include_request_or_error_contents
     assert "private question" not in caplog.text
     assert "secret evidence" not in caplog.text
     assert "api-key" not in caplog.text
+    assert "error_code=retrieval_failed" in caplog.text
 
 
 async def test_l2_timeout_is_not_a_retrieval_fallback():
@@ -90,7 +94,9 @@ async def test_l2_timeout_is_not_a_retrieval_fallback():
     with pytest.raises(UpstreamTimeoutError):
         await ChatOrchestrator(l2=l2, generation=generation, mode="rag").answer(messages)
 
-    assert l2.calls == [{"messages": messages}]
+    fallback_messages = l2.calls[0]["messages"]
+    assert fallback_messages[0].content == GENERATION_SYSTEM_PROMPT
+    assert fallback_messages[1:] == messages
 
 
 async def test_concurrent_requests_do_not_share_state():

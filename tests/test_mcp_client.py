@@ -1,3 +1,4 @@
+import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -47,18 +48,34 @@ async def test_connection_serializes_sdk_content_deterministically_and_truncates
 
     assert sdk_client.called == ("lookup", {"query": "혈압"})
     assert result.is_error is True
-    assert result.content == (
-        '{"content":[{"text":"plain text","type":"text"},'
-        '{"mimeType":"image/png","type":"image"},'
-        '{"mimeType":"text/markdown","name":"guide","type":"resource_link","uri":"file:///guide"},'
-        '{"resource":{"mimeType":"application/json","text":"{\\"z\\": 1}","uri":"file:///evidence"},"type":"resource"}],'
-        '"is_error":true,"structured_content":{"a":[2],"z":1}}'
+    assert result.content == '{"is_error":true,"structured_content":{"a":[2],"z":1}}'
+
+    truncated = SDKMCPConnection(sdk_client, max_tool_result_chars=40)
+    short_result = await truncated.call_tool("lookup", {})
+    assert len(short_result.content) <= 40
+    assert json.loads(short_result.content)["truncated"] is True
+
+
+async def test_connection_preserves_citations_when_large_json_is_bounded():
+    sdk_client = FakeSDKClient(
+        call_result=SimpleNamespace(
+            content=[SimpleNamespace(type="text", text=json.dumps({"cite_uid": "guide:1", "text": "x" * 2_000}))],
+            structured_content=None,
+            is_error=False,
+        )
     )
 
-    truncated = SDKMCPConnection(sdk_client, max_tool_result_chars=80)
-    short_result = await truncated.call_tool("lookup", {})
-    assert len(short_result.content) == 80
-    assert short_result.content.endswith("...[truncated]")
+    result = await SDKMCPConnection(sdk_client, max_tool_result_chars=300).call_tool("lookup", {})
+
+    payload = json.loads(result.content)
+    assert payload["truncated"] is True
+    assert payload["cite_uids"] == ["guide:1"]
+    assert result.cite_uids == ["guide:1"]
+    citation = json.loads(result.citation_contents["guide:1"])
+    assert citation["cite_uids"] == ["guide:1"]
+    assert citation["truncated"] is True
+    assert len(result.citation_contents["guide:1"]) <= 300
+    assert len(result.content) <= 300
 
 
 async def test_mcp_client_connects_with_bearer_http_client_and_delegates(settings_with_key):
@@ -82,8 +99,10 @@ async def test_mcp_client_connects_with_bearer_http_client_and_delegates(setting
 
     @asynccontextmanager
     async def fake_sdk_client(transport):
-        events.append(("client", transport))
-        yield sdk_client
+        events.append(("client-received-transport", transport))
+        async with transport as streams:
+            events.append(("client-entered-transport", streams))
+            yield sdk_client
 
     adapter = MCPClient(
         settings_with_key,
@@ -102,9 +121,10 @@ async def test_mcp_client_connects_with_bearer_http_client_and_delegates(setting
     assert events[0][1]["headers"] == {"Authorization": "Bearer test-key"}
     assert events[0][1]["follow_redirects"] is True
     assert events[1] == ("transport", settings_with_key.mcp_url, "http-client")
-    assert events[2] == ("transport-enter",)
-    assert events[3] == ("client", "transport")
-    assert events[4] == ("transport-exit",)
+    assert events[2][0] == "client-received-transport"
+    assert events[3] == ("transport-enter",)
+    assert events[4] == ("client-entered-transport", "transport")
+    assert events[5] == ("transport-exit",)
 
 
 async def test_mcp_client_wraps_client_teardown_failure(settings_with_key):
@@ -118,8 +138,9 @@ async def test_mcp_client_wraps_client_teardown_failure(settings_with_key):
 
     @asynccontextmanager
     async def failing_sdk_client(transport):
-        yield FakeSDKClient()
-        raise RuntimeError("teardown failed")
+        async with transport:
+            yield FakeSDKClient()
+            raise RuntimeError("teardown failed")
 
     adapter = MCPClient(
         settings_with_key,
@@ -144,7 +165,8 @@ async def test_mcp_client_preserves_caller_body_exception(settings_with_key):
 
     @asynccontextmanager
     async def fake_sdk_client(transport):
-        yield FakeSDKClient()
+        async with transport:
+            yield FakeSDKClient()
 
     adapter = MCPClient(
         settings_with_key,
