@@ -1,3 +1,6 @@
 **
 !Dockerfile
-!main.py
+!requirements.txt
+!app.py
+!lunit_hackathon/
+!lunit_hackathon/**
