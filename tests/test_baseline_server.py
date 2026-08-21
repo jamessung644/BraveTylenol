@@ -69,21 +69,20 @@ class BoundedL2FallbackTest(unittest.TestCase):
                 "messages": [{"role": "user", "content": "혈압이 높으면 어떻게 해야 하나요?"}],
                 "max_tokens": 6_144,
             },
-            "Bearer evaluator-secret",
+            "Bearer lunit_request_test",
             opener=opener,
             environ={},
         )
 
         self.assertEqual(result["choices"][0]["message"]["content"], "맞춤 의료 답변")
         self.assertEqual(len(opener.requests), 1)
-        self.assertGreater(opener.timeouts[0], 0)
-        self.assertLessEqual(opener.timeouts[0], 18)
+        self.assertEqual(opener.timeouts, [30.0])
         outbound = opener.requests[0]
         self.assertEqual(
             outbound.full_url,
             "https://model.hackathon.lunit.io/v1/chat/completions",
         )
-        self.assertEqual(outbound.get_header("Authorization"), "Bearer evaluator-secret")
+        self.assertEqual(outbound.get_header("Authorization"), "Bearer lunit_request_test")
         body = json.loads(outbound.data)
         self.assertEqual(body["model"], "Lunit/L2-preview")
         self.assertEqual(body["max_tokens"], 4_096)
@@ -101,7 +100,7 @@ class BoundedL2FallbackTest(unittest.TestCase):
                 opener = RecordingOpener(failure)
                 result = main.request_l2_or_fallback(
                     {"messages": [{"role": "user", "content": "질문"}]},
-                    "Bearer evaluator-secret",
+                    "Bearer lunit_request_test",
                     opener=opener,
                     environ={},
                 )
@@ -111,6 +110,76 @@ class BoundedL2FallbackTest(unittest.TestCase):
                     main.KOREAN_BASELINE_RESPONSE,
                 )
                 self.assertEqual(len(opener.requests), 1)
+
+    def test_environment_lunit_key_wins_over_evaluator_placeholder(self):
+        opener = RecordingOpener(FakeResponse({"choices": [{"message": {"content": "L2 답변"}}]}))
+
+        result = main.request_l2_or_fallback(
+            {"messages": [{"role": "user", "content": "질문"}]},
+            "Bearer evaluator-placeholder",
+            opener=opener,
+            environ={"LUNIT_FM_API_KEY": "lunit_environment_test"},
+        )
+
+        self.assertEqual(result["choices"][0]["message"]["content"], "L2 답변")
+        self.assertEqual(
+            opener.requests[0].get_header("Authorization"),
+            "Bearer lunit_environment_test",
+        )
+
+    def test_valid_lunit_bearer_is_used_without_environment_key(self):
+        opener = RecordingOpener(FakeResponse({"choices": [{"message": {"content": "L2 답변"}}]}))
+
+        result = main.request_l2_or_fallback(
+            {"messages": [{"role": "user", "content": "질문"}]},
+            "Bearer lunit_request_test",
+            opener=opener,
+            environ={},
+        )
+
+        self.assertEqual(result["choices"][0]["message"]["content"], "L2 답변")
+        self.assertEqual(
+            opener.requests[0].get_header("Authorization"),
+            "Bearer lunit_request_test",
+        )
+
+    def test_non_lunit_bearer_without_environment_falls_back_without_network(self):
+        opener = RecordingOpener(AssertionError("network must not be called"))
+
+        result = main.request_l2_or_fallback(
+            {"messages": [{"role": "user", "content": "질문"}]},
+            "Bearer evaluator-placeholder",
+            opener=opener,
+            environ={},
+        )
+
+        self.assertEqual(
+            result["choices"][0]["message"]["content"],
+            main.KOREAN_BASELINE_RESPONSE,
+        )
+        self.assertEqual(opener.requests, [])
+
+    def test_malformed_environment_keys_fall_back_without_network(self):
+        malformed_keys = [
+            "lunit_test\nsecond-line",
+            "lunit_" + ("x" * 4_096),
+        ]
+
+        for malformed_key in malformed_keys:
+            with self.subTest(key_length=len(malformed_key)):
+                opener = RecordingOpener(AssertionError("network must not be called"))
+                result = main.request_l2_or_fallback(
+                    {"messages": [{"role": "user", "content": "질문"}]},
+                    None,
+                    opener=opener,
+                    environ={"LUNIT_FM_API_KEY": malformed_key},
+                )
+
+                self.assertEqual(
+                    result["choices"][0]["message"]["content"],
+                    main.KOREAN_BASELINE_RESPONSE,
+                )
+                self.assertEqual(opener.requests, [])
 
     def test_server_supports_injected_completion_provider(self):
         self.assertIn("completion_provider", inspect.signature(create_server).parameters)

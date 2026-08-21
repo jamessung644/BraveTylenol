@@ -17,8 +17,9 @@ from urllib.request import Request, urlopen
 MODEL_ID = "team-chatbot"
 UPSTREAM_MODEL_ID = "Lunit/L2-preview"
 UPSTREAM_CHAT_COMPLETIONS_URL = "https://model.hackathon.lunit.io/v1/chat/completions"
-L2_TIMEOUT_SECONDS = 18.0
+L2_TIMEOUT_SECONDS = 30.0
 L2_MAX_TOKENS = 4_096
+MAX_API_KEY_LENGTH = 4_096
 KOREAN_BASELINE_RESPONSE = (
     "질문을 확인했습니다. 증상이 심하거나 갑자기 악화되면 즉시 119 또는 "
     "응급실의 도움을 받고, 정확한 판단을 위해 의료 전문가와 상담해 주세요."
@@ -109,7 +110,7 @@ def request_l2_or_fallback(
     """Try L2 once within the inference budget, otherwise return the baseline."""
 
     environment = os.environ if environ is None else environ
-    api_key = _bearer_token(authorization) or environment.get("LUNIT_FM_API_KEY", "").strip()
+    api_key = _resolve_lunit_api_key(authorization, environment)
     messages = _normalized_messages(request_payload.get("messages"))
     if not api_key or not messages:
         return completion_payload()
@@ -163,7 +164,29 @@ def _bearer_token(authorization: str | None) -> str | None:
     scheme, separator, token = authorization.partition(" ")
     if not separator or scheme.casefold() != "bearer":
         return None
-    return token.strip() or None
+    return token or None
+
+
+def _is_valid_lunit_key(value: str | None) -> bool:
+    if not isinstance(value, str):
+        return False
+    key = value.strip()
+    return (
+        key.startswith("lunit_")
+        and len(value) <= MAX_API_KEY_LENGTH
+        and not any(character in value for character in "\r\n")
+    )
+
+
+def _resolve_lunit_api_key(
+    authorization: str | None,
+    environment: Mapping[str, str],
+) -> str | None:
+    environment_key = environment.get("LUNIT_FM_API_KEY")
+    if _is_valid_lunit_key(environment_key):
+        return environment_key.strip()
+    bearer_key = _bearer_token(authorization)
+    return bearer_key.strip() if _is_valid_lunit_key(bearer_key) else None
 
 
 def _normalized_messages(value: Any) -> list[dict[str, str]]:
