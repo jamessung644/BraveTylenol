@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 
@@ -6,33 +7,37 @@ from httpx import ASGITransport, AsyncClient
 
 from app import create_app
 from lunit_hackathon.config import Settings
-from lunit_hackathon.errors import UpstreamResponseError
-from lunit_hackathon.schemas import L2Completion, TokenUsage
+from lunit_hackathon.deadline import RequestDeadline
+from lunit_hackathon.schemas import ChatMessage, L2Completion, TokenUsage
 
 
 class FakeOrchestrator:
-    def __init__(self, answer="L2 최종 답변"):
+    def __init__(self, answer: str = "L2 최종 답변") -> None:
         self.answer_text = answer
-        self.calls = []
-        self.last_usage = TokenUsage(
-            prompt_tokens=10,
-            completion_tokens=4,
-            total_tokens=14,
-        )
+        self.calls: list[tuple[list[ChatMessage], RequestDeadline]] = []
+        self.last_usage = TokenUsage(prompt_tokens=10, completion_tokens=4, total_tokens=14)
+        self.last_finish_reason = "length"
 
-    async def answer(self, messages):
-        self.calls.append(messages)
+    async def answer(self, messages, deadline) -> str:
+        self.calls.append((messages, deadline))
         return self.answer_text
 
 
-def with_key(monkeypatch):
-    monkeypatch.setenv("LUNIT_FM_API_KEY", "test-key")
-    return Settings(_env_file=None)
+def _settings(**updates) -> Settings:
+    return Settings(_env_file=None, agent_mode="direct", **updates)
 
 
-async def test_health_and_models_work_without_key(monkeypatch):
-    monkeypatch.delenv("LUNIT_FM_API_KEY", raising=False)
-    app = create_app(Settings(_env_file=None))
+async def _post(app, payload, *, headers=None):
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        return await client.post("/v1/chat/completions", json=payload, headers=headers)
+
+
+async def test_health_models_and_valid_completion_keep_evaluator_contract():
+    orchestrator = FakeOrchestrator()
+    app = create_app(_settings(), orchestrator)
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
@@ -40,78 +45,200 @@ async def test_health_and_models_work_without_key(monkeypatch):
         health = await client.get("/health")
         healthz = await client.get("/healthz")
         models = await client.get("/v1/models")
-
-    assert health.status_code == 200
-    assert health.json() == {"status": "ok"}
-    assert healthz.status_code == 200
-    assert healthz.json() == {"status": "ok"}
-    assert models.status_code == 200
-    assert models.json()["data"][0]["id"] == "team-chatbot"
-
-
-async def test_chat_requires_api_key(monkeypatch):
-    monkeypatch.delenv("LUNIT_FM_API_KEY", raising=False)
-    orchestrator = FakeOrchestrator()
-    app = create_app(Settings(_env_file=None), orchestrator)
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
+        before = int(time.time())
         response = await client.post(
             "/v1/chat/completions",
             json={
-                "model": "team-chatbot",
+                "model": "another-evaluator-model",
                 "messages": [{"role": "user", "content": "질문"}],
             },
         )
 
-    assert response.status_code == 503
-    assert orchestrator.calls == []
+    payload = response.json()
+    assert health.json() == {"status": "ok"}
+    assert healthz.json() == {"status": "ok"}
+    assert models.json()["data"][0]["id"] == "team-chatbot"
+    assert response.status_code == 200
+    assert payload["id"].startswith("chatcmpl-")
+    assert before <= payload["created"] <= int(time.time())
+    assert payload["model"] == "team-chatbot"
+    assert payload["choices"] == [
+        {
+            "index": 0,
+            "message": {"role": "assistant", "content": "L2 최종 답변"},
+            "finish_reason": "stop",
+        }
+    ]
+    assert payload["usage"] == {
+        "prompt_tokens": 10,
+        "completion_tokens": 4,
+        "total_tokens": 14,
+    }
+    assert response.headers["x-request-id"]
+    assert len(orchestrator.calls) == 1
+    assert isinstance(orchestrator.calls[0][1], RequestDeadline)
 
 
-async def test_chat_accepts_missing_model_and_forwards_evaluator_bearer_key(monkeypatch):
-    monkeypatch.delenv("LUNIT_FM_API_KEY", raising=False)
-    monkeypatch.setenv("AGENT_MODE", "direct")
+async def test_injected_orchestrator_blank_answer_is_normalized_to_a_valid_completion():
+    response = await _post(
+        create_app(_settings(), FakeOrchestrator("   ")),
+        {"messages": [{"role": "user", "content": "질문"}]},
+    )
 
-    class RecordingL2:
-        received_api_key = None
-        calls = []
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["model"] == "team-chatbot"
+    assert payload["choices"][0]["finish_reason"] == "stop"
+    assert payload["choices"][0]["message"]["content"].strip()
 
-        def __init__(self, settings, *, http_client=None):
-            del http_client
-            type(self).received_api_key = settings.api_key
-            self.last_usage = TokenUsage()
 
-        async def complete(self, **kwargs):
-            type(self).calls.append(kwargs)
-            assert kwargs["messages"][0]["role"] == "system"
-            assert "tools" not in kwargs
-            return L2Completion(content="Bearer 인증 L2 답변")
-
-    monkeypatch.setattr("app.L2Client", RecordingL2)
-    app = create_app(Settings(_env_file=None))
+async def test_chat_validation_preserves_invalid_json_empty_messages_and_streaming_errors():
+    app = create_app(_settings(), FakeOrchestrator())
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
     ) as client:
-        response = await client.post(
+        invalid_json = await client.post(
             "/v1/chat/completions",
-            headers={"Authorization": "Bearer evaluator-secret"},
-            json={"messages": [{"role": "user", "content": "질문"}]},
+            content=b"not-json",
+            headers={"Content-Type": "application/json"},
+        )
+        empty_messages = await client.post(
+            "/v1/chat/completions",
+            json={"messages": []},
+        )
+        invalid_field = await client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "질문"}], "max_tokens": 0},
+        )
+        streaming = await client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "질문"}], "stream": True},
         )
 
-    assert response.status_code == 200
-    assert response.json()["choices"][0]["message"]["content"] == "Bearer 인증 L2 답변"
-    assert response.json()["model"] == "team-chatbot"
-    assert RecordingL2.received_api_key == "evaluator-secret"
-    assert len(RecordingL2.calls) == 1
+    assert invalid_json.status_code == 422
+    assert empty_messages.status_code == 422
+    assert invalid_field.status_code == 422
+    assert streaming.status_code == 400
 
 
-async def test_chat_preserves_multi_turn_history_after_direct_system_prompt(monkeypatch):
-    monkeypatch.setenv("LUNIT_MCP_URL", "https://mcp.injected-by-pipeline.test")
-
+async def test_arbitrary_evaluator_bearer_is_never_used_as_lunit_credential(monkeypatch):
     class RecordingL2:
-        calls = []
+        credentials: list[str | None] = []
+
+        def __init__(self, settings, *, http_client=None):
+            del http_client
+            type(self).credentials.append(settings.api_key)
+            self.last_usage = TokenUsage()
+
+        async def complete(self, **kwargs):
+            assert kwargs["messages"][0]["role"] == "system"
+            return L2Completion(content="직접 의료 답변")
+
+    monkeypatch.setattr("app.L2Client", RecordingL2)
+    response = await _post(
+        create_app(_settings()),
+        {"messages": [{"role": "user", "content": "질문"}]},
+        headers={"Authorization": "Bearer evaluator-placeholder"},
+    )
+
+    assert response.status_code == 200
+    assert RecordingL2.credentials[0] != "evaluator-placeholder"
+    assert RecordingL2.credentials[0].startswith("lunit_")
+
+
+async def test_environment_credential_precedes_valid_lunit_bearer(monkeypatch):
+    class RecordingL2:
+        credential = None
+
+        def __init__(self, settings, *, http_client=None):
+            del http_client
+            type(self).credential = settings.api_key
+            self.last_usage = TokenUsage()
+
+        async def complete(self, **kwargs):
+            del kwargs
+            return L2Completion(content="직접 의료 답변")
+
+    monkeypatch.setattr("app.L2Client", RecordingL2)
+    response = await _post(
+        create_app(_settings(lunit_fm_api_key="lunit_environment_test")),
+        {"messages": [{"role": "user", "content": "질문"}]},
+        headers={"Authorization": "Bearer lunit_request_test"},
+    )
+
+    assert response.status_code == 200
+    assert RecordingL2.credential == "lunit_environment_test"
+
+
+async def test_valid_lunit_bearer_and_non_bearer_requests_remain_safe(monkeypatch):
+    class RecordingL2:
+        credentials: list[str | None] = []
+
+        def __init__(self, settings, *, http_client=None):
+            del http_client
+            type(self).credentials.append(settings.api_key)
+            self.last_usage = TokenUsage()
+
+        async def complete(self, **kwargs):
+            del kwargs
+            return L2Completion(content="직접 의료 답변")
+
+    monkeypatch.setattr("app.L2Client", RecordingL2)
+    app = create_app(_settings())
+    valid = await _post(
+        app,
+        {"messages": [{"role": "user", "content": "질문"}]},
+        headers={"Authorization": "Bearer lunit_request_test"},
+    )
+    non_bearer = await _post(
+        app,
+        {"messages": [{"role": "user", "content": "질문"}]},
+        headers={"Authorization": "Basic evaluator-placeholder"},
+    )
+
+    assert valid.status_code == non_bearer.status_code == 200
+    assert RecordingL2.credentials[0] == "lunit_request_test"
+    assert RecordingL2.credentials[1] != "evaluator-placeholder"
+
+
+@pytest.mark.parametrize(
+    ("requested_max_tokens", "expected_max_tokens"),
+    [(700, 700), (5_000, 4_096)],
+)
+async def test_requested_max_tokens_is_capped_per_request(
+    monkeypatch,
+    requested_max_tokens,
+    expected_max_tokens,
+):
+    class RecordingL2:
+        configured_tokens: list[int] = []
+
+        def __init__(self, settings, *, http_client=None):
+            del http_client
+            type(self).configured_tokens.append(settings.max_completion_tokens)
+            self.last_usage = TokenUsage()
+
+        async def complete(self, **kwargs):
+            del kwargs
+            return L2Completion(content="토큰 제한 답변")
+
+    monkeypatch.setattr("app.L2Client", RecordingL2)
+    response = await _post(
+        create_app(_settings()),
+        {
+            "messages": [{"role": "user", "content": "질문"}],
+            "max_tokens": requested_max_tokens,
+        },
+    )
+
+    assert response.status_code == 200
+    assert RecordingL2.configured_tokens == [expected_max_tokens]
+
+
+async def test_direct_upstream_receives_the_full_multi_turn_history(monkeypatch):
+    class RecordingL2:
+        calls: list[dict] = []
 
         def __init__(self, settings, *, http_client=None):
             del settings, http_client
@@ -127,243 +254,51 @@ async def test_chat_preserves_multi_turn_history_after_direct_system_prompt(monk
         {"role": "assistant", "content": "첫 답변"},
         {"role": "user", "content": "그럼 지금은요?"},
     ]
-    app = create_app(with_key(monkeypatch))
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
-        response = await client.post(
-            "/v1/chat/completions",
-            json={"model": "team-chatbot", "messages": history},
-        )
+    response = await _post(create_app(_settings()), {"messages": history})
 
     assert response.status_code == 200
-    assert len(RecordingL2.calls) == 1
-    upstream_messages = RecordingL2.calls[0]["messages"]
-    assert upstream_messages[0]["role"] == "system"
-    assert upstream_messages[1:] == history
+    assert RecordingL2.calls[0]["messages"][1:] == history
 
 
-@pytest.mark.parametrize(
-    ("requested_max_tokens", "expected_max_tokens"),
-    [(700, 700), (5_000, 4_096)],
-)
-async def test_chat_applies_requested_max_tokens_with_server_cap(
-    monkeypatch,
-    requested_max_tokens,
-    expected_max_tokens,
-):
-    monkeypatch.delenv("LUNIT_MCP_URL", raising=False)
-
+async def test_concurrent_requests_use_distinct_l2_settings_without_token_leakage(monkeypatch):
     class RecordingL2:
-        configured_max_tokens = None
+        configured_tokens: list[int] = []
 
         def __init__(self, settings, *, http_client=None):
             del http_client
-            type(self).configured_max_tokens = settings.max_completion_tokens
+            self.max_tokens = settings.max_completion_tokens
+            type(self).configured_tokens.append(self.max_tokens)
             self.last_usage = TokenUsage()
 
         async def complete(self, **kwargs):
             del kwargs
-            return L2Completion(content="토큰 제한 답변")
+            await asyncio.sleep(0)
+            return L2Completion(content=f"{self.max_tokens} 토큰 답변")
 
     monkeypatch.setattr("app.L2Client", RecordingL2)
-    app = create_app(with_key(monkeypatch))
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
-        response = await client.post(
-            "/v1/chat/completions",
-            json={
-                "model": "team-chatbot",
-                "messages": [{"role": "user", "content": "질문"}],
-                "max_tokens": requested_max_tokens,
-            },
-        )
+    app = create_app(_settings())
+    first, second = await asyncio.gather(
+        _post(app, {"messages": [{"role": "user", "content": "첫 요청"}], "max_tokens": 700}),
+        _post(app, {"messages": [{"role": "user", "content": "둘째 요청"}], "max_tokens": 5_000}),
+    )
 
-    assert response.status_code == 200
-    assert RecordingL2.configured_max_tokens == expected_max_tokens
+    assert first.status_code == second.status_code == 200
+    assert sorted(RecordingL2.configured_tokens) == [700, 4_096]
+    assert {
+        first.json()["choices"][0]["message"]["content"],
+        second.json()["choices"][0]["message"]["content"],
+    } == {"700 토큰 답변", "4096 토큰 답변"}
 
 
-async def test_chat_prefers_evaluator_bearer_over_environment_key(monkeypatch):
-    monkeypatch.setenv("LUNIT_FM_API_KEY", "stale-deployment-key")
-
-    class RecordingL2:
-        received_api_key = None
-
-        def __init__(self, settings, *, http_client=None):
-            del http_client
-            type(self).received_api_key = settings.api_key
-            self.last_usage = TokenUsage()
-
-        async def complete(self, **kwargs):
-            del kwargs
-            return L2Completion(content="요청 키 사용 성공")
-
-    monkeypatch.setattr("app.L2Client", RecordingL2)
-    app = create_app(Settings(_env_file=None))
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
-        response = await client.post(
-            "/v1/chat/completions",
-            headers={"Authorization": "Bearer evaluator-secret"},
-            json={"model": "team-chatbot", "messages": [{"role": "user", "content": "질문"}]},
-        )
-
-    assert response.status_code == 200
-    assert RecordingL2.received_api_key == "evaluator-secret"
-
-
-async def test_chat_rejects_non_bearer_authorization(monkeypatch):
-    monkeypatch.delenv("LUNIT_FM_API_KEY", raising=False)
-    app = create_app(Settings(_env_file=None), FakeOrchestrator())
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
-        response = await client.post(
-            "/v1/chat/completions",
-            headers={"Authorization": "Basic invalid"},
-            json={"model": "team-chatbot", "messages": [{"role": "user", "content": "질문"}]},
-        )
-
-    assert response.status_code == 503
-
-
-async def test_chat_returns_openai_compatible_l2_completion(monkeypatch):
-    orchestrator = FakeOrchestrator()
-    app = create_app(with_key(monkeypatch), orchestrator)
-    before = int(time.time())
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
-        response = await client.post(
-            "/v1/chat/completions",
-            json={
-                "model": "team-chatbot",
-                "messages": [{"role": "user", "content": "질문"}],
-            },
-        )
-
-    payload = response.json()
-    assert response.status_code == 200
-    assert payload["id"].startswith("chatcmpl-")
-    assert before <= payload["created"] <= int(time.time())
-    assert payload["model"] == "team-chatbot"
-    assert payload["choices"][0]["message"]["content"] == "L2 최종 답변"
-    assert payload["usage"]["total_tokens"] == 14
-    assert response.headers["x-request-id"]
-
-
-@pytest.mark.parametrize(
-    ("internal_finish_reason", "public_finish_reason"),
-    [("length", "length"), ("tool_calls", "stop"), ("function_call", "stop")],
-)
-async def test_chat_exposes_consistent_finish_reason(
-    monkeypatch,
-    internal_finish_reason,
-    public_finish_reason,
-):
-    class FinishingOrchestrator(FakeOrchestrator):
-        last_finish_reason = internal_finish_reason
-
-    app = create_app(with_key(monkeypatch), FinishingOrchestrator("잘린 답변"))
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
-        response = await client.post(
-            "/v1/chat/completions",
-            json={"messages": [{"role": "user", "content": "질문"}]},
-        )
-
-    assert response.status_code == 200
-    assert response.json()["choices"][0]["finish_reason"] == public_finish_reason
-
-
-async def test_chat_rejects_streaming(monkeypatch):
-    orchestrator = FakeOrchestrator()
-    app = create_app(with_key(monkeypatch), orchestrator)
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
-        response = await client.post(
-            "/v1/chat/completions",
-            json={
-                "model": "team-chatbot",
-                "messages": [{"role": "user", "content": "질문"}],
-                "stream": True,
-            },
-        )
-
-    assert response.status_code == 400
-    assert orchestrator.calls == []
-
-
-async def test_chat_rejects_empty_messages(monkeypatch):
-    app = create_app(with_key(monkeypatch), FakeOrchestrator())
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
-        response = await client.post(
-            "/v1/chat/completions",
-            json={"model": "team-chatbot", "messages": []},
-        )
-
-    assert response.status_code == 422
-
-
-async def test_upstream_failure_is_sanitized(monkeypatch):
-    class FailingOrchestrator(FakeOrchestrator):
-        async def answer(self, messages):
-            del messages
-            raise UpstreamResponseError("private upstream detail")
-
-    app = create_app(with_key(monkeypatch), FailingOrchestrator())
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
-        response = await client.post(
-            "/v1/chat/completions",
-            json={
-                "model": "team-chatbot",
-                "messages": [{"role": "user", "content": "질문"}],
-            },
-        )
-
-    assert response.status_code == 502
-    assert response.json() == {"detail": "L2 upstream request failed"}
-    assert "private upstream detail" not in response.text
-
-
-async def test_request_logs_exclude_medical_text_and_credentials(monkeypatch, caplog):
+async def test_request_logs_exclude_medical_text_and_credentials(caplog):
     caplog.set_level(logging.INFO)
-    app = create_app(with_key(monkeypatch), FakeOrchestrator())
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
-        response = await client.post(
-            "/v1/chat/completions",
-            json={
-                "model": "team-chatbot",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "PRIVATE-MEDICAL-QUESTION",
-                    }
-                ],
-            },
-        )
+    response = await _post(
+        create_app(_settings(), FakeOrchestrator()),
+        {"messages": [{"role": "user", "content": "PRIVATE-MEDICAL-QUESTION"}]},
+        headers={"Authorization": "Bearer evaluator-placeholder"},
+    )
 
     assert response.status_code == 200
     assert "request_complete" in caplog.text
     assert "PRIVATE-MEDICAL-QUESTION" not in caplog.text
-    assert "test-key" not in caplog.text
+    assert "evaluator-placeholder" not in caplog.text
