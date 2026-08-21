@@ -37,10 +37,13 @@ async def test_health_and_models_work_without_key(monkeypatch):
         base_url="http://test",
     ) as client:
         health = await client.get("/health")
+        healthz = await client.get("/healthz")
         models = await client.get("/v1/models")
 
     assert health.status_code == 200
     assert health.json() == {"status": "ok"}
+    assert healthz.status_code == 200
+    assert healthz.json() == {"status": "ok"}
     assert models.status_code == 200
     assert models.json()["data"][0]["id"] == "team-chatbot"
 
@@ -70,6 +73,7 @@ async def test_chat_forwards_evaluator_bearer_key_to_l2(monkeypatch):
 
     class RecordingL2:
         received_api_key = None
+        calls = []
 
         def __init__(self, settings, *, http_client=None):
             del http_client
@@ -77,7 +81,9 @@ async def test_chat_forwards_evaluator_bearer_key_to_l2(monkeypatch):
             self.last_usage = TokenUsage()
 
         async def complete(self, **kwargs):
+            type(self).calls.append(kwargs)
             assert kwargs["messages"][0]["role"] == "system"
+            assert "tools" not in kwargs
             return L2Completion(content="Bearer 인증 L2 답변")
 
     monkeypatch.setattr("app.L2Client", RecordingL2)
@@ -98,6 +104,7 @@ async def test_chat_forwards_evaluator_bearer_key_to_l2(monkeypatch):
     assert response.status_code == 200
     assert response.json()["choices"][0]["message"]["content"] == "Bearer 인증 L2 답변"
     assert RecordingL2.received_api_key == "evaluator-secret"
+    assert len(RecordingL2.calls) == 1
 
 
 async def test_chat_prefers_evaluator_bearer_over_environment_key(monkeypatch):

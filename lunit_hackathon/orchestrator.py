@@ -3,6 +3,7 @@ from collections.abc import Sequence
 from typing import Any, Literal
 
 from lunit_hackathon.errors import MalformedUpstreamResponseError, RetrievalError
+from lunit_hackathon.prompts import MEDICAL_GENERATION_SYSTEM_PROMPT
 from lunit_hackathon.schemas import ChatMessage, TokenUsage
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,11 @@ class ChatOrchestrator:
         return _required_content(answer)
 
     async def _passthrough(self, messages: Sequence[ChatMessage]) -> str:
-        completion = await self._l2.complete(messages=messages)
+        protected_messages = [
+            ChatMessage(role="system", content=MEDICAL_GENERATION_SYSTEM_PROMPT),
+            *messages,
+        ]
+        completion = await self._l2.complete(messages=protected_messages)
         self.last_usage = completion.usage
         return _required_content(completion.content)
 

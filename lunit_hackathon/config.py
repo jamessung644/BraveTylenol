@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     )
 
     request_timeout_seconds: float = Field(
-        default=110.0,
+        default=65.0,
         gt=0,
         le=175,
         validation_alias=AliasChoices(
@@ -53,7 +53,7 @@ class Settings(BaseSettings):
         validation_alias="L2_RETRY_ATTEMPTS",
     )
     max_completion_tokens: int = Field(
-        default=3_072,
+        default=1_024,
         ge=512,
         le=6_144,
         validation_alias="MAX_COMPLETION_TOKENS",
@@ -67,7 +67,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("AGENT_MODE", "HARNESS_MODE"),
     )
     mcp_url: str | None = Field(
-        default="https://mcp.hackathon.lunit.io/mcp",
+        default=None,
         validation_alias="LUNIT_MCP_URL",
     )
     max_mcp_calls: int = Field(

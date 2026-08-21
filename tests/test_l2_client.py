@@ -41,7 +41,7 @@ async def test_complete_calls_l2_chat_completions(monkeypatch):
     assert seen["body"] == {
         "model": "Lunit/L2-preview",
         "messages": [{"role": "user", "content": "테스트"}],
-        "max_tokens": 3072,
+        "max_tokens": 1024,
         "reasoning_effort": "low",
         "temperature": 0.0,
     }
@@ -213,7 +213,7 @@ async def test_complete_recovers_blank_direct_completion_once(monkeypatch):
 
     assert result.content == "최종 답변"
     assert len(requests) == 2
-    assert requests[1]["max_tokens"] == 1536
+    assert requests[1]["max_tokens"] == 1024
     assert "The patient needs clear red flags" in requests[1]["messages"][-2]["content"]
     assert "final user-facing answer" in requests[1]["messages"][-1]["content"]
 

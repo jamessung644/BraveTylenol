@@ -1,8 +1,8 @@
 # Brave Tylenol — Lunit L2 Medical Chat
 
-Lunit 해커톤 제출용 OpenAI 호환 의료 대화 서비스다. 기본 RAG 모드에서 L2가 검색 필요성을
-판단하고 공식 제공 MCP 도구를 사용할 수 있으며, **최종 사용자 답변은 항상 Lunit L2가
-생성한 텍스트를 그대로 반환한다.**
+Lunit 해커톤 제출용 OpenAI 호환 의료 대화 서비스다. 기본 경로는 속도 우선 L2 1회 직접
+생성이며, LUNIT_MCP_URL을 설정하면 공식 MCP를 사용하는 RAG를 활성화한다. 어느 경로든
+**최종 사용자 답변은 항상 Lunit L2가 생성한 텍스트를 그대로 반환한다.**
 
 자세한 설계와 격리 환경 검토는 [아키텍처 문서](docs/architecture.md)를 참고한다.
 
@@ -59,6 +59,7 @@ Authorization 값이나 전체 응답 본문을 출력하지 않고 실패한다
 지원하는 평가 endpoint:
 
 - GET /health
+- GET /healthz
 - GET /v1/models
 - POST /v1/chat/completions
 - evaluator-facing model ID: team-chatbot
@@ -71,11 +72,11 @@ Authorization 값이나 전체 응답 본문을 출력하지 않고 실패한다
 | LUNIT_FM_API_URL | https://model.hackathon.lunit.io | L2 base URL |
 | LUNIT_FM_MODEL | Lunit/L2-preview | L2 모델 |
 | AGENT_MODE | rag | rag 또는 passthrough |
-| LUNIT_MCP_URL | https://mcp.hackathon.lunit.io/mcp | 주최 측 공식 MCP URL(빈 값이면 직접 생성) |
+| LUNIT_MCP_URL | 없음 | 설정하면 주최 측 공식 MCP 검색 활성화 |
 | MAX_MCP_CALLS | 4 | 구성 가능한 상한(평가 지연 방지를 위해 실행당 최대 2회로 추가 제한) |
-| REQUEST_TIMEOUT_SECONDS | 110 | Driver 종료 전 제어된 응답을 위한 전체 요청 제한 |
+| REQUEST_TIMEOUT_SECONDS | 65 | 단일 기본 L2 호출과 복구를 포함한 전체 요청 제한 |
 | L2_RETRY_ATTEMPTS | 2 | 429/502/503/504 제한 재시도(최대 총 3회 호출) |
-| MAX_COMPLETION_TOKENS | 3072 | 평가 시간을 위한 L2 응답 토큰 상한 |
+| MAX_COMPLETION_TOKENS | 1024 | 평가 시간을 위한 L2 응답 토큰 상한 |
 | LUNIT_REASONING_EFFORT | low | 긴 추론 지연을 줄이는 L2 reasoning effort |
 | MAX_TOOL_RESULT_CHARS | 12000 | 개별 도구 결과 크기 제한 |
 | MAX_EVIDENCE_CHARS | 32000 | L2에 전달할 전체 근거 제한 |
@@ -85,14 +86,13 @@ Authorization 값이나 전체 응답 본문을 출력하지 않고 실패한다
 `HARNESS_LOG_LEVEL`도 동일한 설정의 호환 별칭으로 인식한다.
 
 .env.example 형식을 고정하기 위해 선택 설정은 예제 파일에 넣지 않았다. 제출 컨테이너는
-공식 대회 MCP 주소를 기본으로 사용하고, 필요할 때 배포 환경 변수 LUNIT_MCP_URL로 덮어쓴다.
-MCP URL을 빈 값으로 설정했거나 MCP가 실패하면 일반화된 의료 안전 프롬프트를 포함한 L2 직접 생성으로
-자동 전환한다. MCP URL이 처음부터 없으면 검색 판단 호출도 생략하므로 L2를 정확히 한 번만
-호출한다. 선택적 검색 단계는 전체 요청 제한의 45%, 최대 45초까지만 사용하여 MCP나 검색
-플래너가 느릴 때도 직접 L2 폴백을 실행할 시간을 남긴다.
+속도 우선으로 MCP 없이 시작하며, 의료 안전 프롬프트를 포함한 L2를 정확히 한 번 호출한다.
+공식 근거 검색이 필요한 배포에서는 LUNIT_MCP_URL을 명시해 RAG를 활성화할 수 있다. 이때
+검색 단계는 전체 요청 제한의 45%, 최대 45초까지만 사용하여 MCP나 검색 플래너가 느려도
+직접 L2 폴백 시간을 남긴다.
 
-AGENT_MODE=passthrough는 입력 대화를 L2에 바로 보내는 비교/진단 모드다. 최종 제출 기본값은
-rag다.
+AGENT_MODE=passthrough는 검색 조정 없이 안전 프롬프트와 입력 대화를 L2에 보내는 진단
+모드다. 기본 설정은 MCP가 없으므로 안전 프롬프트 기반 1회 직접 생성으로 동작한다.
 
 ## 5. 검증
 
