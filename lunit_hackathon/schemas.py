@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -22,6 +24,27 @@ class ChatMessage(BaseModel):
     name: str | None = None
     tool_call_id: str | None = None
     tool_calls: list[ToolCall] | None = None
+
+
+class MedicalDomain(StrEnum):
+    DRUG = "drug"
+    DRUG_SAFETY = "drug_safety"
+    REIMBURSEMENT = "reimbursement"
+    CODING = "coding"
+    LAW = "law"
+    GUIDELINE = "guideline"
+    RESEARCH = "research"
+    GENERAL_HEALTH = "general_health"
+    EMERGENCY = "emergency"
+    VULNERABLE_POPULATION = "vulnerable_population"
+
+
+@dataclass(frozen=True)
+class RouteDecision:
+    domains: frozenset[MedicalDomain]
+    tool_names: tuple[str, ...]
+    retrieval_required: bool
+    verification_required: bool
 
 
 class TokenUsage(BaseModel):
