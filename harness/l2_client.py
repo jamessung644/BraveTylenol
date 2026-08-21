@@ -15,7 +15,7 @@ from harness.errors import (
     UpstreamTimeoutError,
     UpstreamTransportError,
 )
-from harness.schemas import ChatMessage, L2Completion
+from harness.schemas import ChatMessage, L2Completion, TokenUsage
 
 
 class L2Client:
@@ -27,6 +27,7 @@ class L2Client:
         self._settings = settings
         self._http_client = http_client
         self._owns_http_client = http_client is None
+        self.last_usage = TokenUsage()
 
     async def __aenter__(self) -> Self:
         return self
@@ -59,7 +60,9 @@ class L2Client:
             payload["tool_choice"] = tool_choice
 
         response = await self._post_completion(payload)
-        return self._parse_completion(response)
+        completion = self._parse_completion(response)
+        self.last_usage = completion.usage
+        return completion
 
     async def _post_completion(self, payload: Mapping[str, Any]) -> httpx.Response:
         client = self._get_http_client()

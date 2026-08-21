@@ -1,12 +1,25 @@
 import time
 import uuid
 from collections.abc import Sequence
+from contextlib import asynccontextmanager
 from typing import Protocol
 
+import httpx
 from fastapi import FastAPI, HTTPException
 
 from harness.config import Settings
-from harness.errors import ConfigurationError
+from harness.errors import (
+    ConfigurationError,
+    MalformedUpstreamResponseError,
+    UpstreamResponseError,
+    UpstreamTimeoutError,
+    UpstreamTransportError,
+)
+from harness.generation import GenerationEngine
+from harness.l2_client import L2Client
+from harness.mcp_client import MCPClient
+from harness.orchestrator import ChatOrchestrator
+from harness.retrieval import RetrievalEngine
 from harness.schemas import (
     ChatCompletionChoice,
     ChatCompletionRequest,
@@ -20,19 +33,31 @@ class ChatOrchestratorProtocol(Protocol):
     async def answer(self, messages: Sequence[ChatMessage]) -> str: ...
 
 
-class _UnavailableOrchestrator:
-    async def answer(self, messages: Sequence[ChatMessage]) -> str:
-        del messages
-        raise ConfigurationError("The chat orchestrator is not configured")
-
-
 def create_app(
     settings: Settings | None = None,
     orchestrator: ChatOrchestratorProtocol | None = None,
 ) -> FastAPI:
     resolved_settings = settings or Settings()
-    resolved_orchestrator = orchestrator or _UnavailableOrchestrator()
-    application = FastAPI()
+    resolved_orchestrator = orchestrator
+
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        application.state.l2_http_client = httpx.AsyncClient()
+        try:
+            yield
+        finally:
+            await application.state.l2_http_client.aclose()
+
+    application = FastAPI(lifespan=lifespan)
+
+    def build_orchestrator() -> ChatOrchestrator:
+        http_client = getattr(application.state, "l2_http_client", None)
+        l2 = L2Client(resolved_settings, http_client=http_client)
+        if resolved_settings.harness_mode == "passthrough":
+            return ChatOrchestrator(l2=l2, generation=None, mode="passthrough")
+        retrieval = RetrievalEngine(l2, MCPClient(resolved_settings), resolved_settings)
+        generation = GenerationEngine(l2, retrieval)
+        return ChatOrchestrator(l2=l2, generation=generation, mode=resolved_settings.harness_mode)
 
     @application.get("/v1/models")
     async def list_models() -> dict[str, object]:
@@ -52,9 +77,14 @@ def create_app(
         if not resolved_settings.api_key:
             raise HTTPException(status_code=503, detail="LUNIT_FM_API_KEY is not configured")
         try:
-            answer = await resolved_orchestrator.answer(request.messages)
+            active_orchestrator = resolved_orchestrator or build_orchestrator()
+            answer = await active_orchestrator.answer(request.messages)
         except ConfigurationError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
+        except UpstreamTimeoutError as error:
+            raise HTTPException(status_code=504, detail="L2 upstream timed out") from error
+        except (UpstreamTransportError, UpstreamResponseError, MalformedUpstreamResponseError) as error:
+            raise HTTPException(status_code=502, detail="L2 upstream request failed") from error
 
         return ChatCompletionResponse(
             id=f"chatcmpl-{uuid.uuid4()}",
@@ -67,7 +97,7 @@ def create_app(
                     finish_reason="stop",
                 )
             ],
-            usage=TokenUsage(),
+            usage=getattr(active_orchestrator, "last_usage", TokenUsage()),
         )
 
     return application
