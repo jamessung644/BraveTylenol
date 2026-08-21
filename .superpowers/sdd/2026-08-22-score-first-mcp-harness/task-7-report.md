@@ -67,3 +67,34 @@ container was stopped.
 - The observed live maximum (74.665 seconds) was below the 165-second per-request gate. Live MCP
   and L2 latency remains external and can vary, so this is recorded as an observed local result,
   not a guarantee.
+
+## Fix Round 1 — Docker ignores and absolute smoke deadlines
+
+Fix commit: `09ac4b08d8341e03f891c427c000c7dabbfbca0f`
+
+- The package allowlist now excludes OpenAI-named material with fully case-insensitive character
+  classes at every package depth. A Docker semantics regression creates a non-secret uppercase
+  sentinel filename temporarily and proves a `COPY` of it fails from the Docker context; the test
+  captures build output and never prints the sentinel contents.
+- Each health/models/completion read now runs in a standard-library child process supervised by
+  the required `ThreadPoolExecutor`. A monotonic parent deadline terminates and, if needed, kills
+  that child, so a peer that drips bytes cannot extend a socket-idle timeout indefinitely. Batch
+  waiting is bounded by preflight plus `ceil(requests / concurrency) * deadline` and a two-second
+  scheduling/cleanup allowance; timed-out work becomes aggregate status `0` failures.
+- URL construction and transport happen inside the guarded child process. Empty or malformed base
+  URLs now return a nonzero aggregate-only result with no traceback or raw endpoint detail.
+- A regression compares the standalone smoke fallback literal with the server fallback constant
+  without importing application dependencies into the smoke script itself.
+
+TDD and verification evidence:
+
+- RED: focused container/smoke tests reported 4 failures and 8 passes: the uppercase artifact was
+  copyable, and the new absolute-deadline CLI option was absent.
+- GREEN: focused tests reported `12 passed in 1.40s`, including the local drip-server and malformed
+  URL subprocess cases.
+- Final: `python3 -m pytest` reported `215 passed in 2.90s`; `python3 -m ruff check .` reported
+  `All checks passed!`; `git diff --check` was clean.
+- Docker context/runtime re-verification: `docker build -t brave-tylenol:score-first .` succeeded.
+  Image inspection confirmed `65532:65532` and `uvicorn app:app --host 0.0.0.0 --port 8000`.
+  No live L2 smoke run was repeated because this fix changes only build-context filtering and
+  smoke-client supervision, not the application runtime behavior.
