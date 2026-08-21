@@ -14,8 +14,8 @@ from lunit_hackathon.prompts import (
 )
 from lunit_hackathon.schemas import ChatMessage, L2Completion, RetrievalResult
 
-_EXPLICIT_CITATION_PATTERN = re.compile(
-    r"(?:\[\s*)?(?:cite_uid|citation)\s*[:=]\s*[`\"']?([A-Za-z0-9_.:/-]+)",
+_EXPLICIT_CITATION_MARKER = re.compile(
+    r"(?P<bracketed>\[\s*)?(?:[\"']?(?:cite_uid|citation)[\"']?)\s*[:=]\s*",
     re.IGNORECASE,
 )
 _PROTOCOL_MARKERS = (
@@ -169,7 +169,8 @@ def _answer_issue(content: str | None, retrieval: RetrievalResult | None) -> str
         return "the answer leaked tool protocol"
     actual = set(_actual_cite_uids(retrieval))
     mentioned = {cite_uid for cite_uid in actual if _contains_exact_cite_uid(content, cite_uid)}
-    invented = set(_EXPLICIT_CITATION_PATTERN.findall(content)) - actual
+    explicit_values = _explicit_citation_values(content, actual)
+    invented = explicit_values - actual
     if invented:
         return f"it included unsupported cite_uid values: {', '.join(sorted(invented))}"
     if actual and not (mentioned & actual):
@@ -178,9 +179,64 @@ def _answer_issue(content: str | None, retrieval: RetrievalResult | None) -> str
 
 
 def _contains_exact_cite_uid(content: str, cite_uid: str) -> bool:
-    boundary = r"[A-Za-z0-9_.:/-]"
+    boundary = (
+        r"[\w./:#-]"
+        if any(character.isalpha() and not character.isascii() for character in cite_uid)
+        else r"[A-Za-z0-9_./:#-]"
+    )
     pattern = rf"(?<!{boundary}){re.escape(cite_uid)}(?!{boundary})"
     return re.search(pattern, content) is not None
+
+
+def _explicit_citation_values(content: str, actual: set[str]) -> set[str]:
+    values: set[str] = set()
+    allowlisted = tuple(sorted(actual, key=len, reverse=True))
+    for marker in _EXPLICIT_CITATION_MARKER.finditer(content):
+        remainder = content[marker.end() :]
+        bracketed = marker.group("bracketed") is not None
+        exact = _exact_marked_uid(remainder, bracketed, allowlisted)
+        if exact is not None:
+            values.add(exact)
+            continue
+        payload = _marker_payload(remainder, bracketed)
+        if payload:
+            values.add(payload)
+    return values
+
+
+def _exact_marked_uid(
+    remainder: str,
+    bracketed: bool,
+    allowlisted: Sequence[str],
+) -> str | None:
+    if remainder[:1] in {"`", '"', "'"}:
+        quote = remainder[0]
+        end = remainder.find(quote, 1)
+        if end > 0:
+            quoted = remainder[1:end]
+            return quoted if quoted in allowlisted else None
+
+    for cite_uid in allowlisted:
+        if not remainder.startswith(cite_uid):
+            continue
+        tail = remainder[len(cite_uid) :]
+        if bracketed and tail.startswith("]"):
+            return cite_uid
+        if not bracketed and (not tail or tail.startswith(("\n", "\r"))):
+            return cite_uid
+    return None
+
+
+def _marker_payload(remainder: str, bracketed: bool) -> str:
+    if remainder[:1] in {"`", '"', "'"}:
+        quote = remainder[0]
+        end = remainder.find(quote, 1)
+        return remainder[1:end].strip() if end > 0 else remainder[1:].strip()
+
+    line = remainder.splitlines()[0] if remainder else ""
+    if bracketed and "]" in line:
+        return line[: line.rfind("]")].strip()
+    return line.strip()
 
 
 def _assistant_message(completion: L2Completion) -> dict[str, Any]:

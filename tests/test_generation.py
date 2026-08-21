@@ -179,6 +179,72 @@ async def test_citation_validation_accepts_plain_uids_and_ignores_ordinary_colon
     assert len(l2.calls) == 1
 
 
+@pytest.mark.parametrize(
+    ("cite_uid", "answer"),
+    [
+        ("uid#1", "근거 [cite_uid: uid#1]"),
+        ("근거 식별자#1", "근거 [cite_uid: 근거 식별자#1]"),
+        ("UID with spaces!?", "근거 [cite_uid: UID with spaces!?]"),
+        ("bracket]adjacent", "근거 [cite_uid: bracket]adjacent]"),
+    ],
+)
+async def test_citation_validation_accepts_any_exact_explicit_selected_uid(cite_uid, answer):
+    l2 = ScriptedL2([L2Completion(content=answer)])
+
+    assert (
+        await GenerationEngine(l2, settings()).grounded_answer(
+            [ChatMessage(role="user", content="근거를 알려줘")],
+            evidence_result(cite_uid=cite_uid),
+            RequestDeadline.start(),
+        )
+        == answer
+    )
+    assert len(l2.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("cite_uid", "first_answer", "corrected"),
+    [
+        ("uid#1", "근거 [cite_uid: uid#12]", "근거 [cite_uid: uid#1]"),
+        ("근거 식별자", "근거 [cite_uid: 근거 식별자 추가]", "근거 [cite_uid: 근거 식별자]"),
+        ("uid", "근거 [cite_uid: uid-long]", "근거 [cite_uid: uid]"),
+    ],
+)
+async def test_explicit_citation_marker_rejects_longer_prefix_collisions_once(
+    cite_uid, first_answer, corrected
+):
+    l2 = ScriptedL2([L2Completion(content=first_answer), L2Completion(content=corrected)])
+
+    assert (
+        await GenerationEngine(l2, settings()).grounded_answer(
+            [ChatMessage(role="user", content="근거를 알려줘")],
+            evidence_result(cite_uid=cite_uid),
+            RequestDeadline.start(),
+        )
+        == corrected
+    )
+    assert len(l2.calls) == 2
+
+
+async def test_explicit_invented_marker_corrects_once_without_treating_bp_as_citation():
+    l2 = ScriptedL2(
+        [
+            L2Completion(content="BP:120/80이며 [cite_uid: invented#1]입니다."),
+            L2Completion(content="BP:120/80이며 [cite_uid: uid#1]입니다."),
+        ]
+    )
+
+    assert (
+        await GenerationEngine(l2, settings()).grounded_answer(
+            [ChatMessage(role="user", content="근거를 알려줘")],
+            evidence_result(cite_uid="uid#1"),
+            RequestDeadline.start(),
+        )
+        == "BP:120/80이며 [cite_uid: uid#1]입니다."
+    )
+    assert len(l2.calls) == 2
+
+
 async def test_citation_validation_requires_exact_uid_boundary_not_a_substring():
     l2 = ScriptedL2(
         [
