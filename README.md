@@ -14,13 +14,13 @@ CoEval이 재시도할 수 있도록 명시적인 오류를 반환합니다.
 - 제출 model name: `team-chatbot`
 - `lunit_...` 형식의 `LUNIT_FM_API_KEY`가 유효한 요청 Bearer보다 우선
 - L2 호출은 요청당 1회이며 서버 내부 재시도 없음
-- upstream timeout 145초, 요청 전체 deadline 150초, queue wait 최대 5초
+- upstream timeout 172초, 요청 전체 deadline 175초, queue wait 최대 30초
 - KCD·식약처·심평원·DailyMed·명시적 PubMed 근거 질문만 공식 MCP 사용
 - MCP는 요청당 최대 1회, timeout 5초, 동시 실행 4개, queue wait 0.15초
 - MCP timeout·오류·빈 결과는 재시도 없이 기존 L2 단일 호출로 전환
 - MCP 결과는 최대 3개·5,000자로 제한하고 식별정보 가능성이 있으면 검색하지 않음
 - completion budget 최대 6,144 token, `reasoning_effort=low`, `temperature=0`
-- L2 outbound 동시 실행은 공식 CoEval 동시성과 같은 16개로 제한
+- L2 outbound 동시 실행은 CoEval validation 상한과 같은 16개로 제한(official test는 12개)
 - 응답 본문은 4MB로 제한하며 slow body도 전체 deadline을 넘길 수 없음
 - L2 timeout, HTTP 오류, 빈 응답, 잘못된 JSON은 정적 답변으로 숨기지 않고
   OpenAI 형태의 HTTP 424 오류로 반환
