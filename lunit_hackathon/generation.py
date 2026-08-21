@@ -5,6 +5,7 @@ from typing import Any
 
 from lunit_hackathon.errors import MalformedUpstreamResponseError
 from lunit_hackathon.prompts import (
+    DIRECT_MEDICAL_GENERATION_SYSTEM_PROMPT,
     MEDICAL_GENERATION_SYSTEM_PROMPT,
     RETRIEVE_RELEVANT_CONTENT_TOOL,
 )
@@ -137,23 +138,27 @@ class GenerationEngine:
     async def direct_answer(self, messages: Sequence[ChatMessage]) -> str:
         """L2-only safe fallback used when optional retrieval is unavailable."""
 
-        conversation = _medical_conversation(messages)
+        conversation = _medical_conversation(
+            messages,
+            system_prompt=DIRECT_MEDICAL_GENERATION_SYSTEM_PROMPT,
+        )
         completion: L2Completion = await self._l2.complete(messages=conversation)
-        content = _final_content(completion)
-        if not _looks_like_tool_protocol(content):
+        content = completion.content
+        if content is not None and content.strip() and not _looks_like_tool_protocol(content):
             return content
         conversation.append(_assistant_message(completion))
         conversation.append(
             {
                 "role": "system",
                 "content": (
-                    "Rewrite the complete user-facing answer without internal tool-call syntax. "
-                    "No retrieval tools are available."
+                    "Provide the complete user-facing answer as plain text without internal "
+                    "tool-call syntax. Ignore any prior attempted tool call because no retrieval "
+                    "tools are available."
                 ),
             }
         )
-        fallback = await self._request_final_submission(conversation, None)
-        return _submitted_content(fallback) or _final_content(fallback)
+        fallback = await self._l2.complete(messages=conversation)
+        return _final_content(fallback)
 
     async def _request_final_submission(
         self,
@@ -216,11 +221,15 @@ class GenerationEngine:
         return corrected_content
 
 
-def _medical_conversation(messages: Sequence[ChatMessage]) -> list[dict[str, Any]]:
+def _medical_conversation(
+    messages: Sequence[ChatMessage],
+    *,
+    system_prompt: str = MEDICAL_GENERATION_SYSTEM_PROMPT,
+) -> list[dict[str, Any]]:
     conversation = [
         ChatMessage(
             role="system",
-            content=MEDICAL_GENERATION_SYSTEM_PROMPT,
+            content=system_prompt,
         ).model_dump(exclude_none=True)
     ]
     conversation.extend(message.model_dump(exclude_none=True) for message in messages)

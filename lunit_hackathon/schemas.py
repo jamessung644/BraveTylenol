@@ -33,6 +33,7 @@ class TokenUsage(BaseModel):
 class L2Completion(BaseModel):
     content: str | None = None
     tool_calls: list[ToolCall] = Field(default_factory=list)
+    finish_reason: str | None = None
     usage: TokenUsage = Field(default_factory=TokenUsage)
 
 
@@ -75,8 +76,9 @@ class RetrievalResult(BaseModel):
 class ChatCompletionRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    model: str
+    model: str | None = None
     messages: list[ChatMessage] = Field(min_length=1)
+    max_tokens: int | None = Field(default=None, ge=1)
     stream: bool = False
 
 

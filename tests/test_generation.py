@@ -446,5 +446,55 @@ async def test_direct_answer_uses_medical_prompt_but_no_tools():
     assert answer == "안전한 직접 답변"
     assert l2.calls[0]["messages"][0]["role"] == "system"
     assert "no more than 300 words" in l2.calls[0]["messages"][0]["content"]
+    assert "No retrieval or other tools are available" in l2.calls[0]["messages"][0]["content"]
+    assert "call retrieve_relevant_content" not in l2.calls[0]["messages"][0]["content"]
     assert l2.calls[0]["messages"][-1]["content"] == "질문"
     assert "tools" not in l2.calls[0]
+
+
+async def test_direct_answer_rewrites_textual_tool_protocol_without_tools():
+    l2 = ScriptedL2(
+        [
+            L2Completion(
+                content="<tool_call>retrieve_relevant_content</tool_call>",
+            ),
+            L2Completion(content="도구 프로토콜을 제거한 최종 답변"),
+        ]
+    )
+
+    answer = await GenerationEngine(l2, FakeRetrieval()).direct_answer(
+        [ChatMessage(role="user", content="질문")]
+    )
+
+    assert answer == "도구 프로토콜을 제거한 최종 답변"
+    assert len(l2.calls) == 2
+    assert all("tools" not in call for call in l2.calls)
+    assert all("tool_choice" not in call for call in l2.calls)
+
+
+async def test_direct_answer_recovers_structured_tool_call_without_executing_it():
+    l2 = ScriptedL2(
+        [
+            L2Completion(
+                tool_calls=[
+                    tool_call(
+                        "hallucinated-1",
+                        "retrieve_relevant_content",
+                        {"query": "사용하면 안 되는 검색"},
+                    )
+                ]
+            ),
+            L2Completion(content="도구 없이 복구한 최종 답변"),
+        ]
+    )
+    retrieval = FakeRetrieval()
+
+    answer = await GenerationEngine(l2, retrieval).direct_answer(
+        [ChatMessage(role="user", content="질문")]
+    )
+
+    assert answer == "도구 없이 복구한 최종 답변"
+    assert retrieval.queries == []
+    assert len(l2.calls) == 2
+    assert all("tools" not in call for call in l2.calls)
+    assert all("tool_choice" not in call for call in l2.calls)

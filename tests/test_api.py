@@ -1,6 +1,7 @@
 import logging
 import time
 
+import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app import create_app
@@ -68,7 +69,7 @@ async def test_chat_requires_api_key(monkeypatch):
     assert orchestrator.calls == []
 
 
-async def test_chat_forwards_evaluator_bearer_key_to_l2(monkeypatch):
+async def test_chat_accepts_missing_model_and_forwards_evaluator_bearer_key(monkeypatch):
     monkeypatch.delenv("LUNIT_FM_API_KEY", raising=False)
 
     class RecordingL2:
@@ -95,16 +96,93 @@ async def test_chat_forwards_evaluator_bearer_key_to_l2(monkeypatch):
         response = await client.post(
             "/v1/chat/completions",
             headers={"Authorization": "Bearer evaluator-secret"},
-            json={
-                "model": "team-chatbot",
-                "messages": [{"role": "user", "content": "질문"}],
-            },
+            json={"messages": [{"role": "user", "content": "질문"}]},
         )
 
     assert response.status_code == 200
     assert response.json()["choices"][0]["message"]["content"] == "Bearer 인증 L2 답변"
+    assert response.json()["model"] == "team-chatbot"
     assert RecordingL2.received_api_key == "evaluator-secret"
     assert len(RecordingL2.calls) == 1
+
+
+async def test_chat_preserves_multi_turn_history_after_direct_system_prompt(monkeypatch):
+    monkeypatch.setenv("LUNIT_MCP_URL", "https://mcp.injected-by-pipeline.test")
+
+    class RecordingL2:
+        calls = []
+
+        def __init__(self, settings, *, http_client=None):
+            del settings, http_client
+            self.last_usage = TokenUsage()
+
+        async def complete(self, **kwargs):
+            type(self).calls.append(kwargs)
+            return L2Completion(content="문맥을 반영한 답변")
+
+    monkeypatch.setattr("app.L2Client", RecordingL2)
+    history = [
+        {"role": "user", "content": "첫 질문"},
+        {"role": "assistant", "content": "첫 답변"},
+        {"role": "user", "content": "그럼 지금은요?"},
+    ]
+    app = create_app(with_key(monkeypatch))
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "team-chatbot", "messages": history},
+        )
+
+    assert response.status_code == 200
+    assert len(RecordingL2.calls) == 1
+    upstream_messages = RecordingL2.calls[0]["messages"]
+    assert upstream_messages[0]["role"] == "system"
+    assert upstream_messages[1:] == history
+
+
+@pytest.mark.parametrize(
+    ("requested_max_tokens", "expected_max_tokens"),
+    [(700, 700), (5_000, 1_024)],
+)
+async def test_chat_applies_requested_max_tokens_with_server_cap(
+    monkeypatch,
+    requested_max_tokens,
+    expected_max_tokens,
+):
+    monkeypatch.delenv("LUNIT_MCP_URL", raising=False)
+
+    class RecordingL2:
+        configured_max_tokens = None
+
+        def __init__(self, settings, *, http_client=None):
+            del http_client
+            type(self).configured_max_tokens = settings.max_completion_tokens
+            self.last_usage = TokenUsage()
+
+        async def complete(self, **kwargs):
+            del kwargs
+            return L2Completion(content="토큰 제한 답변")
+
+    monkeypatch.setattr("app.L2Client", RecordingL2)
+    app = create_app(with_key(monkeypatch))
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "team-chatbot",
+                "messages": [{"role": "user", "content": "질문"}],
+                "max_tokens": requested_max_tokens,
+            },
+        )
+
+    assert response.status_code == 200
+    assert RecordingL2.configured_max_tokens == expected_max_tokens
 
 
 async def test_chat_prefers_evaluator_bearer_over_environment_key(monkeypatch):
@@ -178,6 +256,32 @@ async def test_chat_returns_openai_compatible_l2_completion(monkeypatch):
     assert payload["choices"][0]["message"]["content"] == "L2 최종 답변"
     assert payload["usage"]["total_tokens"] == 14
     assert response.headers["x-request-id"]
+
+
+@pytest.mark.parametrize(
+    ("internal_finish_reason", "public_finish_reason"),
+    [("length", "length"), ("tool_calls", "stop"), ("function_call", "stop")],
+)
+async def test_chat_exposes_consistent_finish_reason(
+    monkeypatch,
+    internal_finish_reason,
+    public_finish_reason,
+):
+    class FinishingOrchestrator(FakeOrchestrator):
+        last_finish_reason = internal_finish_reason
+
+    app = create_app(with_key(monkeypatch), FinishingOrchestrator("잘린 답변"))
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "질문"}]},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["finish_reason"] == public_finish_reason
 
 
 async def test_chat_rejects_streaming(monkeypatch):

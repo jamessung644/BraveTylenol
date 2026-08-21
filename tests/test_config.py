@@ -40,12 +40,17 @@ def test_example_placeholders_are_not_treated_as_credentials(tmp_path, monkeypat
 def test_latency_controls_have_safe_defaults(monkeypatch):
     monkeypatch.delenv("MAX_COMPLETION_TOKENS", raising=False)
     monkeypatch.delenv("LUNIT_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("L2_RETRY_ATTEMPTS", raising=False)
+    monkeypatch.delenv("AGENT_MODE", raising=False)
+    monkeypatch.delenv("HARNESS_MODE", raising=False)
 
     settings = Settings(_env_file=None)
 
     assert settings.request_timeout_seconds == 65
     assert settings.max_completion_tokens == 1024
     assert settings.reasoning_effort == "low"
+    assert settings.retry_attempts == 1
+    assert settings.agent_mode == "direct"
 
 
 def test_container_defaults_to_one_call_direct_mode(monkeypatch):
