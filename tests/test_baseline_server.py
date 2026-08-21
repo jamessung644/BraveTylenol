@@ -155,7 +155,7 @@ class BoundedL2FallbackTest(unittest.TestCase):
             "Bearer lunit_request_test",
         )
 
-    def test_non_lunit_bearer_without_environment_uses_baseline(self):
+    def test_non_lunit_bearer_without_environment_uses_embedded_placeholder(self):
         opener = RecordingOpener(FakeResponse({"choices": [{"message": {"content": "L2 답변"}}]}))
 
         result = main.request_l2_or_fallback(
@@ -165,13 +165,13 @@ class BoundedL2FallbackTest(unittest.TestCase):
             environ={},
         )
 
+        self.assertEqual(result["choices"][0]["message"]["content"], "L2 답변")
         self.assertEqual(
-            result["choices"][0]["message"]["content"],
-            main.KOREAN_BASELINE_RESPONSE,
+            opener.requests[0].get_header("Authorization"),
+            "Bearer ffffffff",
         )
-        self.assertEqual(opener.requests, [])
 
-    def test_malformed_environment_keys_are_ignored_without_sending_placeholder(self):
+    def test_malformed_environment_keys_use_embedded_placeholder(self):
         malformed_keys = [
             "lunit_test\nsecond-line",
             "lunit_" + ("x" * 4_096),
@@ -189,11 +189,11 @@ class BoundedL2FallbackTest(unittest.TestCase):
                     environ={"LUNIT_FM_API_KEY": malformed_key},
                 )
 
+                self.assertEqual(result["choices"][0]["message"]["content"], "L2 답변")
                 self.assertEqual(
-                    result["choices"][0]["message"]["content"],
-                    main.KOREAN_BASELINE_RESPONSE,
+                    opener.requests[0].get_header("Authorization"),
+                    "Bearer ffffffff",
                 )
-                self.assertEqual(opener.requests, [])
 
     def test_extended_coeval_shape_preserves_messages_and_smaller_token_budget(self):
         opener = RecordingOpener(

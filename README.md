@@ -15,8 +15,9 @@ Lunit L2 호출을 한 번만 추가한 안정성 우선 제출본입니다. L2�
 - POST /v1/chat/completions
 - `lunit_...` 형식의 `LUNIT_FM_API_KEY`가 요청 Bearer보다 우선
 - 환경변수가 없을 때만 `lunit_...` 형식의 요청 Bearer를 L2에 전달
-- 두 runtime credential이 모두 없거나 무효하면 placeholder를 전송하지 않고 한국어
-  baseline 응답으로 복귀
+- 두 runtime credential이 모두 없거나 무효하면 `main.py`의 내장 placeholder를 사용
+- 내장 placeholder `ffffffff`는 로컬 실행·Docker build 전에 실제 event key로 교체하고,
+  실제 값은 commit 또는 push하지 않음
 - L2 호출은 요청당 최대 1회, 최대 30초, 최대 4,096 token
 - L2 outbound 동시 실행은 공식 CoEval 동시성과 같은 16개로 제한
 - 응답 본문은 4MB 및 요청 전체 35초 deadline으로 제한해 slow body가 무한정
