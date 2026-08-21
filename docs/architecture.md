@@ -22,33 +22,50 @@
     POST /v1/chat/completions
             |
             v
-    입력 스키마 검증 및 요청 제한
+    입력 스키마 검증
+    (model 생략 허용, max_tokens를 서버 상한 이내로 제한)
             |
             v
-    L2 의료 생성 호출
+       실행 모드 선택
             |
-            +-- 일반 지식으로 충분 --> L2 텍스트 그대로 반환
+            +-- direct(기본) --> L2 의료 생성 --> L2 텍스트 그대로 반환
             |
-            +-- 근거 필요 --> retrieve_relevant_content(query)
-                                  |
-                                  v
-                           MCP 도구 동적 발견
-                                  |
-                                  v
-                           L2 검색 계획 및 도구 호출
-                                  |
-                                  v
-                           인용 선택·중복 제거·크기 제한
-                                  |
-                                  v
-                           근거를 L2에 전달
-                                  |
-                                  v
-                           L2 최종 텍스트 그대로 반환
+            +-- passthrough --> L2 전달 --> L2 텍스트 그대로 반환
+            |
+            +-- rag + MCP URL --> L2 검색 결정 --> retrieve_relevant_content(query)
+                                                        |
+                                                        v
+                                                 MCP 도구 동적 발견
+                                                        |
+                                                        v
+                                                 L2 검색 계획 및 도구 호출
+                                                        |
+                                                        v
+                                                 인용 선택·중복 제거·크기 제한
+                                                        |
+                                                        v
+                                                 근거를 L2에 전달
+                                                        |
+                                                        v
+                                                 L2 최종 텍스트 그대로 반환
 
-기본 컨테이너는 MCP URL이 없으므로 안전 프롬프트 기반 L2 직접 호출을 한 번 수행한다.
-LUNIT_MCP_URL을 명시하면 RAG를 활성화하며, AGENT_MODE=passthrough는 검색 조정 없이 동일한
-안전 프롬프트를 적용하는 진단 모드다.
+기본 컨테이너는 `AGENT_MODE=direct`이므로 MCP URL이 환경에 있어도 안전 프롬프트 기반 L2
+직접 호출을 사용한다. RAG는 `AGENT_MODE=rag`와 `LUNIT_MCP_URL`이 모두 있을 때만
+활성화된다. `AGENT_MODE=rag`인데 URL이 없으면 직접 생성으로 안전하게 폴백한다.
+`AGENT_MODE=passthrough`는 검색 조정 없이 동일한 안전 프롬프트를 적용하는 진단 모드다.
+
+## 평가 API 계약
+
+- `POST /v1/chat/completions`의 `model`은 생략할 수 있다.
+- 모델을 생략한 응답과 `GET /v1/models`에서 사용하는 평가용 모델 ID는
+  `team-chatbot`이다.
+- 선택적인 요청 `max_tokens`는 서버 상한을 늘리지 못한다. 기본 서버 상한은 1,024이며,
+  요청값이 더 작을 때만 해당 값으로 L2 호출을 제한한다.
+- 기본 재시도 횟수는 1회이므로 각 L2 단계의 429/502/503/504 응답에 대해 최초 호출을
+  포함해 최대 2회 시도한다. 연결과 connection-pool 대기는 각각 최대 5초이며, 모든 L2
+  단계·재시도·빈 응답 복구는 하나의 전체 요청 기한 안에서만 실행된다.
+- 응답의 `finish_reason`은 L2의 실제 종료 사유(`stop`, `length` 등)를 보존한다.
+- 스트리밍은 지원하지 않으며 `stream=true` 요청은 400으로 거절한다.
 
 ## 컴포넌트
 
@@ -61,7 +78,7 @@ LUNIT_MCP_URL을 명시하면 RAG를 활성화하며, AGENT_MODE=passthrough는 
 | generation.py | L2가 검색 필요성을 결정하고 최종 답변을 생성하도록 조정 |
 | mcp_client.py | MCP SDK 및 Streamable HTTP 전송을 애플리케이션에서 격리 |
 | retrieval.py | MCP 도구 스키마 검증, 호출 예산, 인용 선택, 근거 크기 제한 |
-| orchestrator.py | RAG/passthrough 선택과 검색 장애 시 L2 폴백 |
+| orchestrator.py | direct/RAG/passthrough 선택과 검색 장애 시 L2 폴백 |
 | prompts.py | 일반화된 의료 안전 및 검색 계획 지침 |
 | logging_config.py | 프롬프트·근거·자격 증명을 제외한 운영 로그 |
 
@@ -72,7 +89,7 @@ LUNIT_MCP_URL을 명시하면 RAG를 활성화하며, AGENT_MODE=passthrough는 
 | API Key 없음 | 준비 상태는 200, 채팅은 503 |
 | L2 타임아웃 | 504 |
 | L2 전송/응답/형식 오류 | 세부정보를 숨긴 502 |
-| MCP URL 없음 또는 연결 실패 | 안전 프롬프트 기반 L2 직접 생성 |
+| rag 모드에서 MCP URL 없음 또는 연결 실패 | 안전 프롬프트 기반 L2 직접 생성 |
 | 개별 MCP 도구 실패 | 검색 L2에 구조화된 오류 전달 |
 | 잘못된 도구 이름/인자 | 실행하지 않고 프로토콜 오류 전달 |
 | MCP 호출 예산 소진 | 수집된 근거를 partial로 L2에 전달 |
@@ -83,7 +100,7 @@ LUNIT_MCP_URL을 명시하면 RAG를 활성화하며, AGENT_MODE=passthrough는 
 런타임 네트워크 대상은 다음 두 종류뿐이다.
 
 1. 필수 Lunit L2 endpoint (LUNIT_FM_API_URL)
-2. LUNIT_MCP_URL을 명시했을 때만 사용하는 대회 공식 MCP endpoint
+2. AGENT_MODE=rag와 LUNIT_MCP_URL을 모두 명시했을 때만 사용하는 대회 공식 MCP endpoint
 
 일반 웹 검색, 상용 검색 API, 클라우드 벡터 DB, 원격 분석 서비스, 외부 인증 서비스에는
 의존하지 않는다. MCP가 구성되지 않아도 L2-only 폴백으로 동작한다. 컨테이너에는 .env,

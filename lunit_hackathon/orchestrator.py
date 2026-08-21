@@ -3,7 +3,7 @@ from collections.abc import Sequence
 from typing import Any, Literal
 
 from lunit_hackathon.errors import MalformedUpstreamResponseError, RetrievalError
-from lunit_hackathon.prompts import MEDICAL_GENERATION_SYSTEM_PROMPT
+from lunit_hackathon.prompts import DIRECT_MEDICAL_GENERATION_SYSTEM_PROMPT
 from lunit_hackathon.schemas import ChatMessage, TokenUsage
 
 logger = logging.getLogger(__name__)
@@ -23,6 +23,7 @@ class ChatOrchestrator:
         self._generation = generation_engine
         self._mode = mode
         self.last_usage = TokenUsage()
+        self.last_finish_reason: str | None = None
 
     async def answer(self, messages: Sequence[ChatMessage]) -> str:
         if self._mode == "passthrough":
@@ -36,6 +37,7 @@ class ChatOrchestrator:
         if self._mode == "direct":
             answer = await self._generation.direct_answer(messages)
             self.last_usage = getattr(self._l2, "last_usage", TokenUsage())
+            self.last_finish_reason = getattr(self._l2, "last_finish_reason", None)
             return _required_content(answer)
 
         try:
@@ -48,15 +50,17 @@ class ChatOrchestrator:
             answer = await self._generation.direct_answer(messages)
 
         self.last_usage = getattr(self._l2, "last_usage", TokenUsage())
+        self.last_finish_reason = getattr(self._l2, "last_finish_reason", None)
         return _required_content(answer)
 
     async def _passthrough(self, messages: Sequence[ChatMessage]) -> str:
         protected_messages = [
-            ChatMessage(role="system", content=MEDICAL_GENERATION_SYSTEM_PROMPT),
+            ChatMessage(role="system", content=DIRECT_MEDICAL_GENERATION_SYSTEM_PROMPT),
             *messages,
         ]
         completion = await self._l2.complete(messages=protected_messages)
-        self.last_usage = completion.usage
+        self.last_usage = getattr(self._l2, "last_usage", completion.usage)
+        self.last_finish_reason = completion.finish_reason
         return _required_content(completion.content)
 
 

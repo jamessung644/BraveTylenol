@@ -39,7 +39,9 @@ class L2Client:
         self._settings = settings
         self._http_client = http_client
         self._owns_http_client = http_client is None
+        self._deadline: float | None = None
         self.last_usage = TokenUsage()
+        self.last_finish_reason: str | None = None
 
     async def __aenter__(self) -> Self:
         return self
@@ -95,8 +97,13 @@ class L2Client:
             )
             if recovery_payload is None:
                 raise
+            self.last_usage = _sum_usage(
+                self.last_usage,
+                self._response_usage(response),
+            )
             completion = self._parse_completion(await self._post(recovery_payload, api_key))
         self.last_usage = _sum_usage(self.last_usage, completion.usage)
+        self.last_finish_reason = completion.finish_reason
         logger.info(
             "l2_completion content_chars=%d tool_calls=%d prompt_tokens=%d completion_tokens=%d",
             len(completion.content or ""),
@@ -173,9 +180,9 @@ class L2Client:
 
     async def _post(self, payload: Mapping[str, Any], api_key: str) -> httpx.Response:
         client = self._client()
-        timeout = httpx.Timeout(self._settings.request_timeout_seconds)
 
         for attempt in range(self._settings.retry_attempts + 1):
+            timeout = self._remaining_timeout()
             started = perf_counter()
             try:
                 response = await client.post(
@@ -226,6 +233,20 @@ class L2Client:
 
         raise AssertionError("unreachable")
 
+    def _remaining_timeout(self) -> httpx.Timeout:
+        now = perf_counter()
+        if self._deadline is None:
+            self._deadline = now + self._settings.request_timeout_seconds
+        remaining = self._deadline - now
+        if remaining <= 0:
+            raise UpstreamTimeoutError("L2 request deadline exhausted")
+        short_timeout = min(5.0, remaining)
+        return httpx.Timeout(
+            remaining,
+            connect=short_timeout,
+            pool=short_timeout,
+        )
+
     def _client(self) -> httpx.AsyncClient:
         if self._http_client is None:
             self._http_client = httpx.AsyncClient()
@@ -245,10 +266,12 @@ class L2Client:
             raise MalformedUpstreamResponseError("L2 returned invalid JSON") from error
 
         try:
-            message = payload["choices"][0]["message"]
+            choice = payload["choices"][0]
+            message = choice["message"]
             completion = L2Completion(
                 content=message.get("content"),
                 tool_calls=message.get("tool_calls") or [],
+                finish_reason=choice.get("finish_reason"),
                 usage=payload.get("usage") or {},
             )
         except (KeyError, IndexError, TypeError, AttributeError, ValidationError) as error:
@@ -257,6 +280,20 @@ class L2Client:
         if not (completion.content and completion.content.strip()) and not completion.tool_calls:
             raise MalformedUpstreamResponseError("L2 returned no content or tool calls")
         return completion
+
+    @staticmethod
+    def _response_usage(response: httpx.Response) -> TokenUsage:
+        try:
+            payload = response.json()
+            return TokenUsage.model_validate(payload.get("usage") or {})
+        except (
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+            AttributeError,
+            TypeError,
+            ValidationError,
+        ):
+            return TokenUsage()
 
     @staticmethod
     def _sanitized_error(response: httpx.Response) -> str:

@@ -35,6 +35,7 @@ from lunit_hackathon.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+_EVALUATOR_MODEL_ID = "team-chatbot"
 
 
 class OrchestratorProtocol(Protocol):
@@ -76,7 +77,7 @@ def create_app(
         # CoEval sends the API key in the request Bearer header and may not
         # provide an MCP endpoint. Without MCP, preserve the medical system
         # prompt but avoid a failed retrieval probe and a second L2 call.
-        if not request_settings.mcp_url:
+        if request_settings.agent_mode == "direct" or not request_settings.mcp_url:
             return ChatOrchestrator(
                 l2_client=l2,
                 generation_engine=GenerationEngine(l2, retrieval_engine=None),
@@ -132,7 +133,7 @@ def create_app(
         return ModelList(
             data=[
                 ModelCard(
-                    id="team-chatbot",
+                    id=_EVALUATOR_MODEL_ID,
                     owned_by="brave-tylenol",
                 )
             ]
@@ -159,9 +160,13 @@ def create_app(
                 detail="LUNIT_FM_API_KEY is not configured",
             )
 
-        request_settings = resolved_settings.model_copy(
-            update={"lunit_fm_api_key": SecretStr(request_api_key)}
-        )
+        settings_updates = {"lunit_fm_api_key": SecretStr(request_api_key)}
+        if request.max_tokens is not None:
+            settings_updates["max_completion_tokens"] = min(
+                request.max_tokens,
+                resolved_settings.max_completion_tokens,
+            )
+        request_settings = resolved_settings.model_copy(update=settings_updates)
         active_orchestrator = orchestrator or build_orchestrator(request_settings)
         try:
             async with asyncio.timeout(request_settings.request_timeout_seconds):
@@ -185,12 +190,14 @@ def create_app(
         return ChatCompletionResponse(
             id=f"chatcmpl-{uuid.uuid4()}",
             created=int(time.time()),
-            model=request.model,
+            model=request.model or _EVALUATOR_MODEL_ID,
             choices=[
                 ChatCompletionChoice(
                     index=0,
                     message=ChatMessage(role="assistant", content=answer),
-                    finish_reason="stop",
+                    finish_reason=_public_finish_reason(
+                        getattr(active_orchestrator, "last_finish_reason", None)
+                    ),
                 )
             ],
             usage=getattr(active_orchestrator, "last_usage", TokenUsage()),
@@ -207,6 +214,14 @@ def _bearer_token(authorization: str | None) -> str | None:
         return None
     token = token.strip()
     return token or None
+
+
+def _public_finish_reason(reason: str | None) -> str:
+    # Internal retrieval/finalization tools are fully resolved before this API
+    # response, which exposes only a normal assistant text message.
+    if reason in {"tool_calls", "function_call"}:
+        return "stop"
+    return reason or "stop"
 
 
 app = create_app()

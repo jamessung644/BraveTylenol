@@ -47,7 +47,7 @@ class Settings(BaseSettings):
         ),
     )
     retry_attempts: int = Field(
-        default=2,
+        default=1,
         ge=0,
         le=3,
         validation_alias="L2_RETRY_ATTEMPTS",
@@ -62,8 +62,8 @@ class Settings(BaseSettings):
         default="low",
         validation_alias="LUNIT_REASONING_EFFORT",
     )
-    agent_mode: Literal["rag", "passthrough"] = Field(
-        default="rag",
+    agent_mode: Literal["direct", "rag", "passthrough"] = Field(
+        default="direct",
         validation_alias=AliasChoices("AGENT_MODE", "HARNESS_MODE"),
     )
     mcp_url: str | None = Field(
