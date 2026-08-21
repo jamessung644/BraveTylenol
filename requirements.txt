@@ -1,3 +1,4 @@
+# Production runtime dependencies only. Development tools belong in requirements-dev.txt.
 fastapi==0.141.1
 httpx==0.28.1
 httpx2==2.12.0
