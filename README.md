@@ -12,7 +12,11 @@ L2 생성이 실패하면 CoEval이 재시도할 수 있도록 명시적인 오�
 - `POST /v1/chat/completions`
 - 제출 model name: `team-chatbot`
 - `lunit_...` 형식의 `LUNIT_FM_API_KEY`가 유효한 요청 Bearer보다 우선
-- L2 호출은 요청당 1회이며 서버 내부 재시도 없음
+- 일반 요청은 L2 1회이며 서버 내부 재시도 없음
+- KCD, 의약품, HIRA, 법률, 진료지침, PubMed 근거가 명시적으로 필요한 경우에만
+  MCP tool을 최대 1회 호출하며, 4초 안에 실패하면 즉시 직접 L2 경로로 진행
+- 복잡한 다중 요구사항 질문은 첫 답변이 85초 안에 생성된 경우에만 최대 55초의
+  두 번째 L2 보완을 허용하며, 실패하면 첫 답변을 그대로 반환
 - upstream timeout 145초, 요청 전체 deadline 150초, queue wait 최대 5초
 - completion budget 최대 4,096 token, `reasoning_effort=low`, `temperature=0`
 - L2 outbound 동시 실행은 공식 CoEval 동시성과 같은 16개로 제한
@@ -32,6 +36,8 @@ L2 생성이 실패하면 CoEval이 재시도할 수 있도록 명시적인 오�
 - 정확한 항목 수, heading, schema, 길이와 제공 사실만 사용하라는 지시를 재확인
 - 약 이름·제형·현재 계획이 없을 때 새 용량이나 복용 시점을 임의로 생성하지 않음
 - 최종 사용자 답변은 항상 L2가 작성
+- 검색 결과는 최대 3,000자로 제한하고 비신뢰 데이터로 취급
+- 일반 질문은 RAG/보완 비용을 전혀 지불하지 않는 direct-first 구조
 
 ## 실행
 
@@ -73,6 +79,7 @@ docker run --rm -p 8000:8000 brave-tylenol-submission
 
 공식 전체 평가 시간에는 답변 생성뿐 아니라 rubric judging도 포함되므로 로컬 서버가
 전체 시간을 단독으로 보장할 수는 없습니다. 서버 내부 재시도를 제거하고 동시성을
-16으로 제한해 중복 호출과 과부하를 막았으며, 정상 생성 구간은 30분 목표에 맞춰
-설계했습니다. 제출 전에는 실제 Docker 이미지로 health, models, chat completion 및
-동시 요청을 확인해야 합니다.
+16으로 제한해 중복 호출과 과부하를 막았습니다. 선택적 RAG는 4초, 조건부 보완은
+빠르게 끝난 고난도 요청에만 적용해 정상 생성 구간을 30분 목표에 맞췄습니다.
+제출 전에는 실제 Docker 이미지로 health, models, chat completion 및 동시 요청을
+확인해야 합니다.
