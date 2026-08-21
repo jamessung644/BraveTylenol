@@ -71,6 +71,7 @@ async def test_chat_requires_api_key(monkeypatch):
 
 async def test_chat_accepts_missing_model_and_forwards_evaluator_bearer_key(monkeypatch):
     monkeypatch.delenv("LUNIT_FM_API_KEY", raising=False)
+    monkeypatch.setenv("AGENT_MODE", "direct")
 
     class RecordingL2:
         received_api_key = None
@@ -145,7 +146,7 @@ async def test_chat_preserves_multi_turn_history_after_direct_system_prompt(monk
 
 @pytest.mark.parametrize(
     ("requested_max_tokens", "expected_max_tokens"),
-    [(700, 700), (5_000, 1_024)],
+    [(700, 700), (5_000, 4_096)],
 )
 async def test_chat_applies_requested_max_tokens_with_server_cap(
     monkeypatch,

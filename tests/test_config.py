@@ -1,3 +1,6 @@
+import pytest
+from pydantic import ValidationError
+
 from lunit_hackathon.config import Settings
 
 
@@ -38,27 +41,84 @@ def test_example_placeholders_are_not_treated_as_credentials(tmp_path, monkeypat
 
 
 def test_latency_controls_have_safe_defaults(monkeypatch):
-    monkeypatch.delenv("MAX_COMPLETION_TOKENS", raising=False)
-    monkeypatch.delenv("LUNIT_REASONING_EFFORT", raising=False)
-    monkeypatch.delenv("L2_RETRY_ATTEMPTS", raising=False)
-    monkeypatch.delenv("AGENT_MODE", raising=False)
-    monkeypatch.delenv("HARNESS_MODE", raising=False)
+    for name in (
+        "REQUEST_TIMEOUT_SECONDS",
+        "UPSTREAM_TIMEOUT_SECONDS",
+        "RETRIEVAL_TIMEOUT_SECONDS",
+        "GENERATION_TIMEOUT_SECONDS",
+        "VERIFICATION_MINIMUM_SECONDS",
+        "MAX_COMPLETION_TOKENS",
+        "LUNIT_REASONING_EFFORT",
+        "RETRIEVAL_REASONING_EFFORT",
+        "GENERATION_REASONING_EFFORT",
+        "VERIFICATION_REASONING_EFFORT",
+        "L2_RETRY_ATTEMPTS",
+        "AGENT_MODE",
+        "HARNESS_MODE",
+        "LUNIT_MCP_URL",
+        "MAX_MCP_CALLS",
+        "MAX_TOOL_CALLS",
+        "MAX_EVIDENCE_CHARS",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
     settings = Settings(_env_file=None)
 
-    assert settings.request_timeout_seconds == 65
-    assert settings.max_completion_tokens == 1024
+    assert settings.request_timeout_seconds == 165
+    assert settings.retrieval_timeout_seconds == 75
+    assert settings.generation_timeout_seconds == 60
+    assert settings.verification_minimum_seconds == 25
+    assert settings.max_completion_tokens == 4096
     assert settings.reasoning_effort == "low"
+    assert settings.retrieval_reasoning_effort == "medium"
+    assert settings.generation_reasoning_effort == "high"
+    assert settings.verification_reasoning_effort == "medium"
     assert settings.retry_attempts == 1
-    assert settings.agent_mode == "direct"
+    assert settings.agent_mode == "rag"
+    assert settings.mcp_url == "https://mcp.hackathon.lunit.io/mcp"
+    assert settings.max_mcp_calls == 6
+    assert settings.max_evidence_chars == 24_000
 
 
-def test_container_defaults_to_one_call_direct_mode(monkeypatch):
+def test_container_defaults_to_score_first_mcp_mode(monkeypatch):
     monkeypatch.delenv("LUNIT_MCP_URL", raising=False)
 
     settings = Settings(_env_file=None)
 
-    assert settings.mcp_url is None
+    assert settings.mcp_url == "https://mcp.hackathon.lunit.io/mcp"
+
+
+def test_score_first_settings_support_environment_overrides(monkeypatch):
+    monkeypatch.setenv("RETRIEVAL_TIMEOUT_SECONDS", "74")
+    monkeypatch.setenv("GENERATION_TIMEOUT_SECONDS", "59")
+    monkeypatch.setenv("VERIFICATION_MINIMUM_SECONDS", "24")
+    monkeypatch.setenv("RETRIEVAL_REASONING_EFFORT", "low")
+    monkeypatch.setenv("GENERATION_REASONING_EFFORT", "medium")
+    monkeypatch.setenv("VERIFICATION_REASONING_EFFORT", "high")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.retrieval_timeout_seconds == 74
+    assert settings.generation_timeout_seconds == 59
+    assert settings.verification_minimum_seconds == 24
+    assert settings.retrieval_reasoning_effort == "low"
+    assert settings.generation_reasoning_effort == "medium"
+    assert settings.verification_reasoning_effort == "high"
+
+
+@pytest.mark.parametrize(
+    ("environment_name", "value"),
+    [
+        ("RETRIEVAL_TIMEOUT_SECONDS", "0"),
+        ("GENERATION_TIMEOUT_SECONDS", "176"),
+        ("VERIFICATION_MINIMUM_SECONDS", "0"),
+    ],
+)
+def test_stage_budget_values_must_be_positive_and_bounded(monkeypatch, environment_name, value):
+    monkeypatch.setenv(environment_name, value)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
 
 
 def test_legacy_baseline_environment_names_remain_supported(monkeypatch):
