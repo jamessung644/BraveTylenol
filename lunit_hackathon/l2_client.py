@@ -57,15 +57,20 @@ class L2Client:
         messages: Sequence[ChatMessage | Mapping[str, Any]],
         tools: Sequence[Mapping[str, Any]] | None = None,
         tool_choice: str | Mapping[str, Any] | None = None,
+        max_tokens: int | None = None,
     ) -> L2Completion:
         api_key = self._settings.api_key
         if not api_key:
             raise ConfigurationError("LUNIT_FM_API_KEY is required in .env or the environment")
 
+        token_budget = self._settings.max_completion_tokens
+        if max_tokens is not None:
+            token_budget = min(self._settings.max_completion_tokens, max(512, max_tokens))
+
         payload: dict[str, Any] = {
             "model": self._settings.lunit_fm_model,
             "messages": [self._serialize_message(message) for message in messages],
-            "max_tokens": self._settings.max_completion_tokens,
+            "max_tokens": token_budget,
             "reasoning_effort": self._settings.reasoning_effort,
             "temperature": 0.0,
         }
@@ -129,7 +134,7 @@ class L2Client:
         recovery_payload["messages"] = messages
         recovery_payload["max_tokens"] = min(
             self._RECOVERY_MAX_TOKENS,
-            self._settings.max_completion_tokens,
+            int(original_payload["max_tokens"]),
         )
         return recovery_payload
 

@@ -45,3 +45,4 @@ def test_latency_controls_have_safe_defaults(monkeypatch):
 
     assert settings.max_completion_tokens == 3072
     assert settings.reasoning_effort == "low"
+    assert settings.agent_mode == "fast"

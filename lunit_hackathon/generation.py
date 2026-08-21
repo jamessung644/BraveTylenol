@@ -3,6 +3,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from lunit_hackathon.errors import MalformedUpstreamResponseError
+from lunit_hackathon.fast_policy import choose_generation_profile
 from lunit_hackathon.prompts import (
     MEDICAL_GENERATION_SYSTEM_PROMPT,
     RETRIEVE_RELEVANT_CONTENT_TOOL,
@@ -76,17 +77,25 @@ class GenerationEngine:
         return _final_content(final)
 
     async def direct_answer(self, messages: Sequence[ChatMessage]) -> str:
-        """L2-only safe fallback used when optional retrieval is unavailable."""
+        """One-call HealthBench path with a local latency policy."""
 
-        completion: L2Completion = await self._l2.complete(messages=_medical_conversation(messages))
+        profile = choose_generation_profile(messages)
+        completion: L2Completion = await self._l2.complete(
+            messages=_medical_conversation(messages, system_prompt=profile.system_prompt),
+            max_tokens=profile.max_tokens,
+        )
         return _final_content(completion)
 
 
-def _medical_conversation(messages: Sequence[ChatMessage]) -> list[dict[str, Any]]:
+def _medical_conversation(
+    messages: Sequence[ChatMessage],
+    *,
+    system_prompt: str = MEDICAL_GENERATION_SYSTEM_PROMPT,
+) -> list[dict[str, Any]]:
     conversation = [
         ChatMessage(
             role="system",
-            content=MEDICAL_GENERATION_SYSTEM_PROMPT,
+            content=system_prompt,
         ).model_dump(exclude_none=True)
     ]
     conversation.extend(message.model_dump(exclude_none=True) for message in messages)

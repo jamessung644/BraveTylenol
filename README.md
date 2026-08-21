@@ -1,8 +1,8 @@
 # Brave Tylenol — Lunit L2 Medical Chat
 
-Lunit 해커톤 제출용 OpenAI 호환 의료 대화 서비스다. 기본 RAG 모드에서 L2가 검색 필요성을
-판단하고 공식 제공 MCP 도구를 사용할 수 있으며, **최종 사용자 답변은 항상 Lunit L2가
-생성한 텍스트를 그대로 반환한다.**
+Lunit 해커톤 제출용 OpenAI 호환 의료 대화 서비스다. 기본 `fast` 모드는 로컬 위험도
+라우터가 질문별 토큰 예산과 짧은 의료 지침만 고른 뒤 L2를 정확히 한 번 호출한다.
+**최종 사용자 답변은 항상 Lunit L2가 생성한 텍스트를 그대로 반환한다.**
 
 자세한 설계와 격리 환경 검토는 [아키텍처 문서](docs/architecture.md)를 참고한다.
 
@@ -70,7 +70,7 @@ Authorization 값이나 전체 응답 본문을 출력하지 않고 실패한다
 | --- | --- | --- |
 | LUNIT_FM_API_URL | https://model.hackathon.lunit.io | L2 base URL |
 | LUNIT_FM_MODEL | Lunit/L2-preview | L2 모델 |
-| AGENT_MODE | rag | rag 또는 passthrough |
+| AGENT_MODE | fast | fast, rag 또는 passthrough |
 | LUNIT_MCP_URL | 없음 | 주최 측이 공식 제공한 MCP URL |
 | MAX_MCP_CALLS | 4 | 한 검색 실행의 최대 MCP 호출 수 |
 | REQUEST_TIMEOUT_SECONDS | 110 | Driver 종료 전 제어된 응답을 위한 전체 요청 제한 |
@@ -83,12 +83,12 @@ Authorization 값이나 전체 응답 본문을 출력하지 않고 실패한다
 
 .env.example 형식을 고정하기 위해 선택 설정은 예제 파일에 넣지 않았다. 공식 대회 문서에서
 MCP URL을 확인한 경우에만 개인 .env 또는 배포 환경 변수로 LUNIT_MCP_URL을 추가한다.
-MCP URL이 없거나 MCP가 실패하면 일반화된 의료 안전 프롬프트를 포함한 L2 직접 생성으로
-자동 전환한다. MCP URL이 처음부터 없으면 검색 판단 호출도 생략하므로 L2를 정확히 한 번만
-호출한다.
+`fast`는 MCP나 검색 판단 호출 없이 L2를 정확히 한 번만 호출한다. 일반 질문은 1,024토큰,
+응급 표현 또는 긴 임상 문맥은 1,536토큰 상한을 사용한다. Python 라우터는 답변을 만들지
+않고 실행 프로필만 선택한다. 빈 응답일 때에만 제한된 복구 호출을 한 번 허용한다.
 
-AGENT_MODE=passthrough는 입력 대화를 L2에 바로 보내는 비교/진단 모드다. 최종 제출 기본값은
-rag다.
+`AGENT_MODE=rag`는 공식 MCP endpoint가 있을 때만 사용하는 비교 모드이며 더 느리다.
+`AGENT_MODE=passthrough`는 의료 지침 없이 입력 대화를 L2에 바로 보내는 진단 모드다.
 
 ## 5. 검증
 
@@ -101,6 +101,7 @@ rag다.
 
 - L2 Authorization, payload, 재시도, 오류 정리, 응답 검증
 - .env 로딩, 자리표시자 거부, 비밀값 마스킹
+- 위험도별 토큰 예산과 HealthBench 지향 단일 L2 호출
 - L2 직접 답변과 검색 후 최종 L2 답변
 - MCP 도구 발견, 인자 스키마 검증, 인용 선택, 호출/크기 제한
 - MCP 장애 시 L2 폴백과 L2 오류의 올바른 전파
@@ -116,9 +117,9 @@ Docker가 설치된 환경에서:
 이미지는 비루트 사용자로 실행되고 .env, 테스트, 문서, 캐시를 포함하지 않는다. API Key를
 Dockerfile의 ARG/ENV로 빌드하지 않는다.
 
-현재 개발 PC에는 Docker CLI가 없어 로컬 이미지 빌드는 아직 검증하지 못했다. 제출 전
-Docker가 있는 환경에서 build, /health, /v1/models, 키가 주입된 L2 연결을 반드시
-재확인해야 한다.
+실제 L2 지연은 모델 서버 부하에 따라 달라지므로 전체 3분 완료를 보장하지 않는다. 301개를
+동시성 16으로 3분 안에 생성하려면 요청당 평균 약 9.6초가 필요하다. 제출 전 실제 L2로
+대표 질문의 지연과 빈 응답률을 측정해야 한다.
 
 ## 7. 격리 환경 원칙
 

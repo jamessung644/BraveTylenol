@@ -49,6 +49,23 @@ async def test_complete_calls_l2_chat_completions(monkeypatch):
     assert result.usage.total_tokens == 6
 
 
+async def test_complete_honors_a_smaller_per_request_token_budget(monkeypatch):
+    settings = settings_with_key(monkeypatch)
+    seen = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "답변"}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        await L2Client(settings, http_client=http_client).complete(
+            messages=[{"role": "user", "content": "질문"}],
+            max_tokens=1024,
+        )
+
+    assert seen["body"]["max_tokens"] == 1024
+
+
 async def test_complete_parses_tool_calls(monkeypatch):
     settings = settings_with_key(monkeypatch)
 
@@ -164,6 +181,29 @@ async def test_complete_recovers_blank_direct_completion_once(monkeypatch):
     assert requests[1]["max_tokens"] == 1536
     assert "The patient needs clear red flags" in requests[1]["messages"][-2]["content"]
     assert "final user-facing answer" in requests[1]["messages"][-1]["content"]
+
+
+async def test_blank_recovery_never_expands_the_fast_request_budget(monkeypatch):
+    settings = settings_with_key(monkeypatch)
+    requests = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "", "reasoning": "draft"}}]},
+            )
+        return httpx.Response(200, json={"choices": [{"message": {"content": "최종"}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        result = await L2Client(settings, http_client=http_client).complete(
+            messages=[{"role": "user", "content": "질문"}],
+            max_tokens=1024,
+        )
+
+    assert result.content == "최종"
+    assert requests[1]["max_tokens"] == 1024
 
 
 async def test_complete_rejects_blank_after_one_recovery(monkeypatch):

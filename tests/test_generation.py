@@ -127,6 +127,21 @@ async def test_direct_answer_uses_medical_prompt_but_no_tools():
 
     assert answer == "안전한 직접 답변"
     assert l2.calls[0]["messages"][0]["role"] == "system"
-    assert "no more than 300 words" in l2.calls[0]["messages"][0]["content"]
+    assert "HealthBench" in l2.calls[0]["messages"][0]["content"]
     assert l2.calls[0]["messages"][-1]["content"] == "질문"
+    assert l2.calls[0]["max_tokens"] == 1024
     assert "tools" not in l2.calls[0]
+
+
+async def test_direct_answer_uses_exactly_one_l2_call_for_emergency():
+    l2 = ScriptedL2([L2Completion(content="Call emergency services now.")])
+    engine = GenerationEngine(l2, FakeRetrieval())
+
+    answer = await engine.direct_answer(
+        [ChatMessage(role="user", content="They are unconscious and not breathing normally")]
+    )
+
+    assert answer == "Call emergency services now."
+    assert len(l2.calls) == 1
+    assert l2.calls[0]["max_tokens"] == 1536
+    assert "urgent action first" in l2.calls[0]["messages"][0]["content"]

@@ -17,37 +17,27 @@
   호출한다.
 - HealthBench 문항이나 예상 답변을 식별하거나 하드코딩하지 않는다.
 
-## 요청 흐름
+## 기본 요청 흐름
 
     POST /v1/chat/completions
             |
             v
-    입력 스키마 검증 및 요청 제한
+    입력 스키마 검증
             |
             v
-    L2 의료 생성 호출
+    로컬 fast_policy
             |
-            +-- 일반 지식으로 충분 --> L2 텍스트 그대로 반환
+            +-- 일반 질문 --------> 1,024 tokens
+            +-- 응급/복합 문맥 ---> 1,536 tokens
             |
-            +-- 근거 필요 --> retrieve_relevant_content(query)
-                                  |
-                                  v
-                           MCP 도구 동적 발견
-                                  |
-                                  v
-                           L2 검색 계획 및 도구 호출
-                                  |
-                                  v
-                           인용 선택·중복 제거·크기 제한
-                                  |
-                                  v
-                           근거를 L2에 전달
-                                  |
-                                  v
-                           L2 최종 텍스트 그대로 반환
+            v
+    짧은 의료 시스템 지침 + 전체 대화
+            |
+            v
+    L2 1회 생성 --> L2 텍스트 그대로 반환
 
-AGENT_MODE=passthrough는 MCP 효과 비교와 장애 진단을 위한 L2 직접 호출 모드다. 기본값은
-rag다.
+기본값은 `AGENT_MODE=fast`다. `rag`는 공식 MCP가 있는 실험에만 사용하며 기존 검색 경로를
+보존한다. `passthrough`는 프롬프트 효과 비교와 장애 진단용이다.
 
 ## 컴포넌트
 
@@ -56,11 +46,12 @@ rag다.
 | app.py | OpenAI 호환 HTTP 계약, 총 요청 기한, 오류 상태 변환 |
 | main.py | 서버 및 실 L2 연결 확인 CLI |
 | config.py | .env/환경 변수 검증과 비밀값 마스킹 |
+| fast_policy.py | 응급/복합 문맥 탐지와 질문별 토큰·프롬프트 선택 |
 | l2_client.py | L2 Chat Completions 호출, 제한된 재시도, 응답 검증 |
-| generation.py | L2가 검색 필요성을 결정하고 최종 답변을 생성하도록 조정 |
+| generation.py | fast 단일 호출과 선택적 RAG 생성을 조정 |
 | mcp_client.py | MCP SDK 및 Streamable HTTP 전송을 애플리케이션에서 격리 |
 | retrieval.py | MCP 도구 스키마 검증, 호출 예산, 인용 선택, 근거 크기 제한 |
-| orchestrator.py | RAG/passthrough 선택과 검색 장애 시 L2 폴백 |
+| orchestrator.py | fast/RAG/passthrough 선택과 검색 장애 시 L2 폴백 |
 | prompts.py | 일반화된 의료 안전 및 검색 계획 지침 |
 | logging_config.py | 프롬프트·근거·자격 증명을 제외한 운영 로그 |
 
@@ -71,7 +62,7 @@ rag다.
 | API Key 없음 | 준비 상태는 200, 채팅은 503 |
 | L2 타임아웃 | 504 |
 | L2 전송/응답/형식 오류 | 세부정보를 숨긴 502 |
-| MCP URL 없음 또는 연결 실패 | 안전 프롬프트 기반 L2 직접 생성 |
+| MCP URL 없음 또는 연결 실패 | fast 단일 L2 생성 |
 | 개별 MCP 도구 실패 | 검색 L2에 구조화된 오류 전달 |
 | 잘못된 도구 이름/인자 | 실행하지 않고 프로토콜 오류 전달 |
 | MCP 호출 예산 소진 | 수집된 근거를 partial로 L2에 전달 |
@@ -106,5 +97,6 @@ Python 패키지 설치는 이미지 빌드 단계에만 필요하다. 대회 �
 - 모든 L2/MCP I/O는 비동기다.
 - 요청별 오케스트레이터와 검색 상태를 사용해 대화 간 상태 누출을 막는다.
 - L2 HTTP 연결 풀만 FastAPI lifespan 동안 공유한다.
+- fast 경로는 일반 1,024, 응급·복합 1,536 토큰으로 생성 상한을 낮춘다.
 - MCP 호출 횟수, 개별 도구 결과, 전체 근거 크기, 전체 요청 시간을 제한한다.
 - 영구 대화 저장이나 교차 요청 캐시는 사용하지 않는다.

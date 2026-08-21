@@ -59,8 +59,8 @@ class Settings(BaseSettings):
         default="low",
         validation_alias="LUNIT_REASONING_EFFORT",
     )
-    agent_mode: Literal["rag", "passthrough"] = Field(
-        default="rag",
+    agent_mode: Literal["fast", "rag", "passthrough"] = Field(
+        default="fast",
         validation_alias="AGENT_MODE",
     )
     mcp_url: str | None = Field(default=None, validation_alias="LUNIT_MCP_URL")

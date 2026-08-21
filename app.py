@@ -73,6 +73,13 @@ def create_app(
                 mode="passthrough",
             )
 
+        if request_settings.agent_mode == "fast":
+            return ChatOrchestrator(
+                l2_client=l2,
+                generation_engine=GenerationEngine(l2, retrieval_engine=None),
+                mode="direct",
+            )
+
         # CoEval sends the API key in the request Bearer header and may not
         # provide an MCP endpoint. Without MCP, preserve the medical system
         # prompt but avoid a failed retrieval probe and a second L2 call.
