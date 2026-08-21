@@ -135,3 +135,18 @@ Fix commit: `e38629c6b0efda6e64ad4e04ac5f14d3ff575b8c`
 - Final verification: `python3 -m pytest` reported `221 passed in 2.78s`; `python3 -m ruff check .`
   passed; `git diff --check` was clean. Docker was not started or rebuilt because no container or
   Docker-context file changed.
+
+## Fix Round 4 — cleanup fail-closed enforcement
+
+Fix commit: `a077d188d825b12b6faa2451a4c80b9d5b224d8b`
+
+- An executor shutdown error now replaces every result with aggregate status-0 failures, including
+  a batch whose submitted futures all returned 200.
+- The supervisor rechecks child liveness after the final kill/join. A still-alive or unverifiable
+  child forces `(0, None)` after its bounded terminate/join/kill/join cleanup sequence.
+- Parent and child pipe-close handling now catches ordinary unexpected resource exceptions such as
+  `RuntimeError` while preserving control-flow exceptions outside those safe-close handlers.
+- RED: 3 new P1 regression tests failed for shutdown false-success, live-after-kill, and unexpected
+  parent close failure. GREEN: focused smoke/container tests reported `21 passed in 1.48s`.
+- Final: `python3 -m pytest` reported `224 passed in 2.76s`; Ruff and `git diff --check` passed.
+  Docker was not started or rebuilt because no Docker/runtime-context file changed.
