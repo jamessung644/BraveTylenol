@@ -14,13 +14,16 @@ from typing import Any
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
+from lunit_hackathon.credentials import (
+    EMBEDDED_LUNIT_API_KEY,  # noqa: F401 - retained as the baseline's public credential export.
+    resolve_lunit_api_key,
+)
+
 MODEL_ID = "team-chatbot"
 UPSTREAM_MODEL_ID = "Lunit/L2-preview"
 UPSTREAM_CHAT_COMPLETIONS_URL = "https://model.hackathon.lunit.io/v1/chat/completions"
 L2_TIMEOUT_SECONDS = 30.0
 L2_MAX_TOKENS = 4_096
-MAX_API_KEY_LENGTH = 4_096
-EMBEDDED_LUNIT_API_KEY = "lunit_e7PwpnMvugu5i4_VE74Hfzka3qU8aMytjGwpog3ce90"
 KOREAN_BASELINE_RESPONSE = (
     "질문을 확인했습니다. 증상이 심하거나 갑자기 악화되면 즉시 119 또는 "
     "응급실의 도움을 받고, 정확한 판단을 위해 의료 전문가와 상담해 주세요."
@@ -159,37 +162,11 @@ def request_l2_or_fallback(
         return completion_payload()
 
 
-def _bearer_token(authorization: str | None) -> str | None:
-    if not authorization:
-        return None
-    scheme, separator, token = authorization.partition(" ")
-    if not separator or scheme.casefold() != "bearer":
-        return None
-    return token or None
-
-
-def _is_valid_lunit_key(value: str | None) -> bool:
-    if not isinstance(value, str):
-        return False
-    key = value.strip()
-    return (
-        key.startswith("lunit_")
-        and len(value) <= MAX_API_KEY_LENGTH
-        and not any(character in value for character in "\r\n")
-    )
-
-
 def _resolve_lunit_api_key(
     authorization: str | None,
     environment: Mapping[str, str],
-) -> str | None:
-    environment_key = environment.get("LUNIT_FM_API_KEY")
-    if _is_valid_lunit_key(environment_key):
-        return environment_key.strip()
-    bearer_key = _bearer_token(authorization)
-    if _is_valid_lunit_key(bearer_key):
-        return bearer_key.strip()
-    return EMBEDDED_LUNIT_API_KEY
+) -> str:
+    return resolve_lunit_api_key(authorization, environment.get("LUNIT_FM_API_KEY"))
 
 
 def _normalized_messages(value: Any) -> list[dict[str, str]]:

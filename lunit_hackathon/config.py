@@ -38,13 +38,31 @@ class Settings(BaseSettings):
     )
 
     request_timeout_seconds: float = Field(
-        default=65.0,
+        default=165.0,
         gt=0,
         le=175,
         validation_alias=AliasChoices(
             "REQUEST_TIMEOUT_SECONDS",
             "UPSTREAM_TIMEOUT_SECONDS",
         ),
+    )
+    retrieval_timeout_seconds: float = Field(
+        default=75.0,
+        gt=0,
+        le=175,
+        validation_alias="RETRIEVAL_TIMEOUT_SECONDS",
+    )
+    generation_timeout_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        le=175,
+        validation_alias="GENERATION_TIMEOUT_SECONDS",
+    )
+    verification_minimum_seconds: float = Field(
+        default=25.0,
+        gt=0,
+        le=175,
+        validation_alias="VERIFICATION_MINIMUM_SECONDS",
     )
     retry_attempts: int = Field(
         default=1,
@@ -53,7 +71,7 @@ class Settings(BaseSettings):
         validation_alias="L2_RETRY_ATTEMPTS",
     )
     max_completion_tokens: int = Field(
-        default=1_024,
+        default=4_096,
         ge=512,
         le=6_144,
         validation_alias="MAX_COMPLETION_TOKENS",
@@ -62,16 +80,28 @@ class Settings(BaseSettings):
         default="low",
         validation_alias="LUNIT_REASONING_EFFORT",
     )
+    retrieval_reasoning_effort: Literal["low", "medium", "high"] = Field(
+        default="medium",
+        validation_alias="RETRIEVAL_REASONING_EFFORT",
+    )
+    generation_reasoning_effort: Literal["low", "medium", "high"] = Field(
+        default="high",
+        validation_alias="GENERATION_REASONING_EFFORT",
+    )
+    verification_reasoning_effort: Literal["low", "medium", "high"] = Field(
+        default="medium",
+        validation_alias="VERIFICATION_REASONING_EFFORT",
+    )
     agent_mode: Literal["direct", "rag", "passthrough"] = Field(
-        default="direct",
+        default="rag",
         validation_alias=AliasChoices("AGENT_MODE", "HARNESS_MODE"),
     )
     mcp_url: str | None = Field(
-        default=None,
+        default="https://mcp.hackathon.lunit.io/mcp",
         validation_alias="LUNIT_MCP_URL",
     )
     max_mcp_calls: int = Field(
-        default=4,
+        default=6,
         ge=0,
         le=12,
         validation_alias=AliasChoices("MAX_MCP_CALLS", "MAX_TOOL_CALLS"),
@@ -83,7 +113,7 @@ class Settings(BaseSettings):
         validation_alias="MAX_TOOL_RESULT_CHARS",
     )
     max_evidence_chars: int = Field(
-        default=32_000,
+        default=24_000,
         ge=2_000,
         le=200_000,
         validation_alias="MAX_EVIDENCE_CHARS",
