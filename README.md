@@ -16,7 +16,7 @@ bake it into an image, or pass it as a Docker build argument.
 | `LUNIT_FM_API_URL` | No | `https://model.hackathon.lunit.io` | L2 API base URL. |
 | `LUNIT_FM_MODEL` | No | `Lunit/L2-preview` | L2 model identifier. |
 | `LUNIT_MCP_URL` | No | `https://mcp.hackathon.lunit.io/mcp` | Contest MCP endpoint used in `rag` mode. |
-| `HARNESS_MODE` | No | `rag` | `rag` enables MCP retrieval; `passthrough` calls L2 directly. |
+| `HARNESS_MODE` | No | `passthrough` | `passthrough` calls L2 directly; `rag` enables MCP retrieval. |
 | `MAX_TOOL_CALLS` | No | `4` | Maximum MCP tool-call rounds in RAG mode. |
 | `UPSTREAM_TIMEOUT_SECONDS` | No | `150` | Deadline for the complete chat request (including RAG), in seconds. |
 | `MAX_TOOL_RESULT_CHARS` | No | `12000` | Per-tool-result truncation limit. |
@@ -44,7 +44,7 @@ when starting the container:
 docker build -t brave-tylenol:baseline .
 docker run --rm -p 8000:8000 \
   -e LUNIT_FM_API_KEY \
-  -e HARNESS_MODE=rag \
+  -e HARNESS_MODE=passthrough \
   brave-tylenol:baseline
 ```
 
@@ -68,10 +68,10 @@ curl --fail --silent http://127.0.0.1:8000/v1/chat/completions \
 
 ### Mode comparison
 
-- `HARNESS_MODE=rag` (default): the orchestrator allows L2 to retrieve
-  relevant contest data through MCP, then returns L2's final answer.
-- `HARNESS_MODE=passthrough`: no MCP retrieval client is constructed; the
+- `HARNESS_MODE=passthrough` (default): no MCP retrieval client is constructed; the
   original chat messages go straight to L2, whose final answer is returned.
+- `HARNESS_MODE=rag`: the orchestrator allows L2 to retrieve relevant contest
+  data through MCP, then returns L2's final answer.
 
 ## Submission and live checks
 
