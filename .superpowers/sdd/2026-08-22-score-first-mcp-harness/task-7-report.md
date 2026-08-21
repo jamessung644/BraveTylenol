@@ -116,3 +116,22 @@ Fix commit: `876cdea15c825675b15a3720c561af100b44cb00`
   `python3 -m pytest` reported `218 passed in 2.99s`, `python3 -m ruff check .` passed, and
   `git diff --check` was clean.
 - Dockerfile and `.dockerignore` were unchanged in this round, so a Docker rebuild was not needed.
+
+## Fix Round 3 — resource-failure containment
+
+Fix commit: `e38629c6b0efda6e64ad4e04ac5f14d3ff575b8c`
+
+- Executor construction and submission now fail closed to one aggregate status-0 result per
+  requested completion, canceling any already submitted work and attempting non-blocking executor
+  shutdown without exposing resource errors.
+- Child-process cleanup is stepwise: `is_alive`, terminate, join, recheck, kill, and final join
+  each run independently when safe after a successful start. Any observable cleanup failure
+  overrides a previously received status with `(0, None)` so a partial cleanup can never claim a
+  200 success.
+- Child pipe closure is guarded, preventing a close-only failure from emitting a child traceback.
+- RED: the new deterministic fault injection tests reported 3 failures for executor construction,
+  cleanup false-success, and pipe-close traceback paths. GREEN: focused smoke/container checks
+  reported `18 passed in 1.46s`.
+- Final verification: `python3 -m pytest` reported `221 passed in 2.78s`; `python3 -m ruff check .`
+  passed; `git diff --check` was clean. Docker was not started or rebuilt because no container or
+  Docker-context file changed.
