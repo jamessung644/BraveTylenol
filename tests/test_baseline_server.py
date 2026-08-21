@@ -1,12 +1,169 @@
 import http.client
+import inspect
 import json
 import re
 import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from urllib.error import URLError
 
+import main
 from main import MODEL_ID, create_server
+
+
+class FakeResponse:
+    def __init__(self, payload, *, status=200):
+        self.status = status
+        self.body = json.dumps(payload).encode()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        del args
+
+    def read(self, limit=-1):
+        return self.body if limit < 0 else self.body[:limit]
+
+
+class RecordingOpener:
+    def __init__(self, response):
+        self.response = response
+        self.requests = []
+        self.timeouts = []
+
+    def __call__(self, request, *, timeout):
+        self.requests.append(request)
+        self.timeouts.append(timeout)
+        if isinstance(self.response, BaseException):
+            raise self.response
+        return self.response
+
+
+class BoundedL2FallbackTest(unittest.TestCase):
+    def test_exposes_one_call_l2_fallback_boundary(self):
+        self.assertTrue(callable(getattr(main, "request_l2_or_fallback", None)))
+
+    def test_returns_l2_text_from_one_bounded_request(self):
+        opener = RecordingOpener(
+            FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {"role": "assistant", "content": "맞춤 의료 답변"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 20,
+                        "total_tokens": 30,
+                    },
+                }
+            )
+        )
+
+        result = main.request_l2_or_fallback(
+            {
+                "messages": [{"role": "user", "content": "혈압이 높으면 어떻게 해야 하나요?"}],
+                "max_tokens": 6_144,
+            },
+            "Bearer evaluator-secret",
+            opener=opener,
+            environ={},
+        )
+
+        self.assertEqual(result["choices"][0]["message"]["content"], "맞춤 의료 답변")
+        self.assertEqual(len(opener.requests), 1)
+        self.assertGreater(opener.timeouts[0], 0)
+        self.assertLessEqual(opener.timeouts[0], 18)
+        outbound = opener.requests[0]
+        self.assertEqual(
+            outbound.full_url,
+            "https://model.hackathon.lunit.io/v1/chat/completions",
+        )
+        self.assertEqual(outbound.get_header("Authorization"), "Bearer evaluator-secret")
+        body = json.loads(outbound.data)
+        self.assertEqual(body["model"], "Lunit/L2-preview")
+        self.assertEqual(body["max_tokens"], 4_096)
+        self.assertEqual(body["messages"][-1]["content"], "혈압이 높으면 어떻게 해야 하나요?")
+
+    def test_l2_failure_returns_baseline_without_retry(self):
+        failures = [
+            URLError(TimeoutError("stalled")),
+            FakeResponse({"error": "unavailable"}, status=503),
+            FakeResponse({"choices": [{"message": {"role": "assistant", "content": ""}}]}),
+        ]
+
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                opener = RecordingOpener(failure)
+                result = main.request_l2_or_fallback(
+                    {"messages": [{"role": "user", "content": "질문"}]},
+                    "Bearer evaluator-secret",
+                    opener=opener,
+                    environ={},
+                )
+
+                self.assertEqual(
+                    result["choices"][0]["message"]["content"],
+                    main.KOREAN_BASELINE_RESPONSE,
+                )
+                self.assertEqual(len(opener.requests), 1)
+
+    def test_server_supports_injected_completion_provider(self):
+        self.assertIn("completion_provider", inspect.signature(create_server).parameters)
+
+    def test_server_forwards_valid_coeval_request_to_provider(self):
+        calls = []
+
+        def provider(payload, authorization):
+            calls.append((payload, authorization))
+            return main.completion_payload("L2 기반 답변")
+
+        server = create_server(
+            "127.0.0.1",
+            0,
+            completion_provider=provider,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection(
+                "127.0.0.1",
+                server.server_address[1],
+                timeout=1,
+            )
+            body = json.dumps(
+                {
+                    "model": MODEL_ID,
+                    "messages": [{"role": "user", "content": "질문"}],
+                    "stream": False,
+                }
+            ).encode()
+            connection.request(
+                "POST",
+                "/v1/chat/completions",
+                body=body,
+                headers={
+                    "Authorization": "Bearer evaluator-secret",
+                    "Content-Type": "application/json",
+                },
+            )
+            response = connection.getresponse()
+            payload = json.loads(response.read())
+            connection.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=1)
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(payload["choices"][0]["message"]["content"], "L2 기반 답변")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0]["messages"][-1]["content"], "질문")
+        self.assertEqual(calls[0][1], "Bearer evaluator-secret")
 
 
 class BaselineServerTest(unittest.TestCase):

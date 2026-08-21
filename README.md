@@ -1,8 +1,10 @@
-# BraveTylenol no-timeout Korean baseline
+# BraveTylenol bounded-L2 Korean baseline
 
-이 브랜치는 점수보다 실행 안정성을 우선하는 비상용 기준선입니다. 영어로 된
-HealthBench 입력을 포함해 어떤 채팅 요청이 들어와도 외부 API, Lunit L2, MCP,
-검색, 재시도를 호출하지 않고 고정된 한국어 응답을 즉시 반환합니다.
+이 브랜치는 Trial 16에서 완주한 `9ead580` no-timeout Korean baseline을 바탕으로
+Lunit L2 호출을 한 번만 추가한 안정성 우선 제출본입니다. L2가 18초 안에 정상
+텍스트를 반환하면 그 답변을 사용하고, 인증·네트워크·HTTP·JSON·빈 응답·시간초과
+문제가 생기면 HTTP 오류를 평가기에 전파하지 않고 검증된 한국어 기준 응답으로
+복귀합니다. MCP와 재시도는 사용하지 않습니다.
 
 ## 평가 환경 계약
 
@@ -11,8 +13,10 @@ HealthBench 입력을 포함해 어떤 채팅 요청이 들어와도 외부 API,
 - GET /health, GET /healthz
 - GET /v1/models
 - POST /v1/chat/completions
-- model 생략, 임의 추가 필드, stream=true, 빈 본문, 잘못된 JSON도 채팅
-  엔드포인트에서는 HTTP 200의 일반 JSON completion으로 처리
+- 정상 CoEval 요청은 대화 전체와 요청 Bearer token을 L2로 전달
+- L2 호출은 요청당 최대 1회, 최대 18초, 최대 4,096 token
+- model 생략, 임의 추가 필드, stream=true, 빈 본문, 잘못된 JSON과 모든 L2
+  실패도 채팅 엔드포인트에서는 HTTP 200의 일반 JSON completion으로 처리
 - API 키와 Authorization 헤더가 없어도 실행
 - Python 표준 라이브러리만 사용하며 빌드 중 pip install 없음
 
@@ -37,7 +41,7 @@ curl --max-time 2 \
 python -m unittest discover -s tests -p 'test_baseline_server.py' -v
 ~~~
 
-Docker가 있는 환경에서는 다음처럼 네트워크를 끊고 확인할 수 있습니다.
+Docker가 있는 환경에서는 네트워크를 끊어 fallback 완주 경로를 확인할 수 있습니다.
 
 ~~~bash
 docker build -t brave-tylenol-baseline .
@@ -46,7 +50,8 @@ docker run --rm --network=none -p 8000:8000 brave-tylenol-baseline
 
 ## 중요한 제한
 
-대회 문서의 공식 규칙은 최종 답변을 Lunit/L2-preview가 생성하도록 요구합니다.
-이 브랜치는 그 규칙을 의도적으로 충족하지 않는 정적 0점 기준선이며, API 기동과
-응답 형식만 보장하기 위한 비상용입니다. 해당 규칙을 지켜 점수를 얻으려면 기존
-L2 기반 제출 브랜치를 사용해야 합니다.
+대회 문서의 공식 규칙에 따라 정상 경로의 최종 답변은 `Lunit/L2-preview`가
+생성합니다. 단, 단일 L2 호출이 실패하거나 18초를 넘으면 전체 CoEval 실행을
+실패시키지 않기 위해 정적 안전 응답을 반환합니다. 검증 세트 약 301개와 동시성
+16을 기준으로 모든 L2 요청이 제한시간까지 지연되어도 생성 대기 상한은 대략
+`ceil(301 / 16) × 18 = 342초`입니다.
