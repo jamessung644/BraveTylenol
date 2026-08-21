@@ -461,6 +461,7 @@ def compile_bundle(source_root: Path, runtime_sources: Path) -> dict[str, Any]:
         "mcp_failure_final": "Phase artifact: evidence failure final",
         "emergency_final": "Phase artifact: emergency final",
         "clean_recovery_final": "Phase artifact: clean final recovery",
+        "safe_completion_final": "Phase artifact: safe completion final",
     }
     generation_phases: dict[str, str] = {}
     for phase, heading in phase_headings.items():
@@ -470,7 +471,7 @@ def compile_bundle(source_root: Path, runtime_sources: Path) -> dict[str, Any]:
             f"Generation {phase} prompt",
         )
     for phase in phase_headings:
-        if phase == "tool_decision":
+        if phase in {"tool_decision", "safe_completion_final"}:
             continue
         generation_phases[phase] = _compile_final_generation(
             generation_phases[phase],

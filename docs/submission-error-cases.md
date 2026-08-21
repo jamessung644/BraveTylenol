@@ -55,6 +55,10 @@ Use this checklist before promoting a submission commit.
 - Tests for a legacy entrypoint do not prove the active image. Keep the active
   runtime suite separate, and require the packaging test to show that excluded
   legacy files cannot affect the image.
+- Run the `CANDIDATE_COMMIT` packaging test from the Git worktree, not from the
+  extracted archive. The test deliberately invokes `git ls-files`, verifies the
+  commit, and creates its own clean archive; an archive has no `.git` metadata
+  and will otherwise report a false packaging failure.
 
 ## Model latency and final-answer starvation
 
@@ -69,6 +73,40 @@ Use this checklist before promoting a submission commit.
 - Validate direct, emergency, MCP-success, and MCP-failure paths separately.
   Record aggregate status, latency, finish reason, call count, and citation yield,
   but never credentials, prompts, answers, raw evidence, or citation identifiers.
+
+## Final validation and bounded safety completion
+
+- A valid HTTP response from L2 can still be unusable: blank output, tool-call
+  syntax, an unsupported finish reason, invented citation syntax, or an
+  unverified official claim previously produced evaluator-visible 502 errors.
+- The active path rebuilds one clean final transcript from the frozen request.
+  If that output is also invalid, malformed, or timed out and the absolute
+  request deadline still has room, it makes exactly one 30-second/256-token
+  `safe_completion_final` L2 call with only a fixed normal/emergency indicator.
+  It never copies the medical question, rejected draft, tool transcript, or
+  evidence into this last call.
+- The safety notice is accepted only when it is Korean plain text in one or two
+  sentences, explicitly says it is not a medical diagnosis, and gives a
+  positive clinician-referral or emergency action. Explicitly negated actions
+  such as “119에 연락하지 마세요” or “의료진에게 상담하지 마세요” must fail.
+- If L2 itself remains unavailable or the fixed safety call is invalid, return
+  the sanitized upstream error. Never manufacture a Python-authored medical
+  answer merely to force HTTP 200; the competition requires L2-authored final
+  output.
+- Real-parser tests must cover all three requests. Updating only scripted model
+  fixtures can miss a stale two-call assertion or a parser-only function-call
+  failure.
+
+## Latency optimizations that did not work
+
+- Lowering the tool-decision token ceiling did not improve the official Model
+  micro-gate: 1,536/1,024/768 tokens all produced valid calls, while 1,024 was
+  about 1% slower and 768 about 14% slower on the fixed three-query sample.
+  Keep 1,536 unless a new paired gate proves a benefit.
+- Prefer lossless sparse model-facing envelopes over shorter answer budgets.
+  Null, empty, and constant audit placeholders may be omitted while preserving
+  raw dialogue, uncertainty state, evidence status, citation mapping, and
+  material limitations.
 
 ## Approved official-network validation
 

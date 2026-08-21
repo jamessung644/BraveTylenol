@@ -589,7 +589,11 @@ async def test_generation_rejects_legacy_function_call_in_recovery(monkeypatch):
                 [ChatMessage(role="user", content="일반적인 건강 질문")]
             )
 
-    assert len(requests) == 2
+    assert len(requests) == 3
+    assert requests[2]["max_tokens"] == 256
+    assert "일반적인 건강 질문" not in json.dumps(
+        requests[2], ensure_ascii=False
+    )
 
 
 async def test_generation_rejects_malformed_modern_tool_call_in_recovery(monkeypatch):
@@ -641,7 +645,62 @@ async def test_generation_rejects_malformed_modern_tool_call_in_recovery(monkeyp
                 [ChatMessage(role="user", content="일반적인 건강 질문")]
             )
 
-    assert len(requests) == 2
+    assert len(requests) == 3
+    assert requests[2]["max_tokens"] == 256
+    assert "일반적인 건강 질문" not in json.dumps(
+        requests[2], ensure_ascii=False
+    )
+
+
+async def test_generation_real_parser_returns_valid_fixed_safe_completion(monkeypatch):
+    settings = settings_with_key(monkeypatch)
+    requests = []
+    safe_answer = (
+        "안전하게 검증된 답변을 이번 시도에서 완료하지 못했습니다. "
+        "본 안내는 의학적 진단을 대신하지 않으므로 의료진에게 직접 평가받으세요."
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) == 1:
+            message = {"content": "<tool_call>invalid</tool_call>"}
+            finish_reason = "stop"
+        elif len(requests) == 2:
+            message = {
+                "content": None,
+                "function_call": {
+                    "name": "retrieve_relevant_content",
+                    "arguments": '{"query":"x"}',
+                },
+            }
+            finish_reason = "function_call"
+        else:
+            message = {"content": safe_answer}
+            finish_reason = "stop"
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": message,
+                        "finish_reason": finish_reason,
+                    }
+                ]
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = L2Client(settings, http_client=http_client)
+        answer = await GenerationEngine(client, None).direct_answer(
+            [ChatMessage(role="user", content="일반적인 건강 질문")]
+        )
+
+    assert answer == safe_answer
+    assert len(requests) == 3
+    assert requests[2]["max_tokens"] == 256
+    assert "일반적인 건강 질문" not in json.dumps(
+        requests[2], ensure_ascii=False
+    )
 
 
 async def test_complete_does_not_recover_blank_tool_planner(monkeypatch):

@@ -79,6 +79,9 @@ mode selection (default hybrid; direct opt-out)
                     phase-specific final Generation L2 --> validator
                                         |
                                         +-- invalid --> clean fresh recovery 정확히 1회
+                                                            |
+                                                            +-- invalid/malformed/timeout + deadline 남음
+                                                                   --> fixed-indicator safe_completion_final L2 1회
                                         |
                                         v
                                   plain L2 text
@@ -98,10 +101,16 @@ prompt를 사용해 검색 때문에 즉시 행동 안내가 늦어지지 않게
 안전한 위치, dispatcher 지시를 우선하며 통제되지 않는 외부 출혈은 지속 직접압박을 중심으로 한다.
 
 Generation prompt는 `tool_decision`, `direct_final`, `post_retrieval_final`,
-`mcp_failure_final`, `emergency_final`, `clean_recovery_final` 여섯 artifact로 나뉘고 각각
-SHA-256 검증된다. 근거 기능의 이름·schema·호출 지시는 tool-decision phase에만 존재한다.
+`mcp_failure_final`, `emergency_final`, `clean_recovery_final`, `safe_completion_final` 일곱
+artifact로 나뉘고 각각 SHA-256 검증된다. 근거 기능의 이름·schema·호출 지시는 tool-decision
+phase에만 존재한다.
 Final phase는 이전 decision system, application call, invalid assistant draft를 append하지 않고
 항상 frozen inbound와 phase context에서 새 transcript를 만든다.
+
+일반 Generation과 evidence의 model-facing v4 projection은 sparse하다. 선택적인 null·unknown·
+빈 문자열·빈 객체 placeholder는 보내지 않고 의미가 있는 status·분류·근거만 보존한다. 이
+생략은 임상 사실의 부재나 검증 완료를 뜻하지 않으며 최신 사용자 원문, history 순서,
+evidence status를 변경하지 않는다.
 
 ## Hybrid routing 계약
 
@@ -180,6 +189,7 @@ Configured 값은 artifact ceiling과 domain ceiling을 넘지 못하며 `AGENT_
 | retrieval planner L2 | attempt당 25초 | remote call 계획 및 local finalization; 동적 Retrieval 상한 적용 |
 | final Generation | 최대 145초, 최대 4,096 tokens | evidence/no-evidence 뒤 사용자 답변; 남은 전체 요청 deadline 적용 |
 | clean final recovery | 최대 145초, 최대 4,096 tokens | 남은 전체 요청 deadline 안에서 plain text·종료 사유·인용 invariant 재생성 또는 최초 final timeout 복구, 정확히 1회 |
+| safe completion final | 최대 30초, 최대 256 tokens | initial final과 recovery가 모두 실패하고 deadline이 남은 경우 fixed indicator만으로 한국어 1~2문장 생성; tool·retry 없음 |
 | RAG admission | 16 | 공식 C16 cohort를 수용하고 초과 요청은 즉시 하향 |
 | MCP call | configured 기본 3, effective ceiling 1~3 | artifact·설정·도메인 중 최솟값으로 tool loop 상한 |
 | model semaphore | 16 | CoEval 동시성에 맞춘 보호 |
@@ -189,7 +199,10 @@ Configured 값은 artifact ceiling과 domain ceiling을 넘지 못하며 `AGENT_
 forced-tool, planner와 모든 final/recovery 단계는 client 내부 blank-completion recovery를 끄고
 명시된 phase budget을 넘기지 않는다. Final content가 비어 있거나 application protocol 흔적을
 포함하거나 종료 사유가 `stop`/미지정 이외이거나 인용 계약을 위반하면 frozen inbound에서
-clean final recovery를 정확히 한 번 실행하고, 재실패는 sanitized 502로 종료한다.
+clean final recovery를 정확히 한 번 실행한다. Recovery도 invalid·malformed이거나 timeout이고
+deadline이 남으면 사용자 의료 원문·draft·tool/evidence가 없는 fixed indicator transcript로
+`safe_completion_final`을 정확히 한 번 실행한다. 이 phase의 호출·출력까지 실패할 때만
+Python 의료 fallback 없이 sanitized upstream error로 종료한다.
 
 MCP transport의 connect/discovery/call이 정지해도 Retrieval 전체 `asyncio.timeout`이 먼저
 취소하고 `retrieval_timeout` no-evidence로 전환한다. Hybrid와 forced RAG admission은 사용
@@ -241,15 +254,16 @@ RAG가 시작된 뒤 Retrieval 실패 시 일반 direct prompt로 몰래 전환�
 | --- | --- |
 | 유효한 환경·embedded main·request Bearer credential 모두 없음 | health는 200, readiness/chat은 503 |
 | 환경 key 없는 evaluator가 유효한 Bearer로 `/readyz` 호출 | static readiness 200; 외부 dependency는 preflight하지 않음 |
-| L2 타임아웃 | 504 |
-| L2 전송/응답/형식 오류 | 세부정보를 숨긴 502 |
+| Initial final과 clean recovery의 timeout·invalid·malformed | deadline이 남으면 fixed-indicator `safe_completion_final` L2 1회 |
+| `safe_completion_final`도 timeout·invalid·malformed | Python 의료 fallback 없이 세부정보를 숨긴 502/504 |
+| 그 밖의 L2 전송/인증 오류 | Python 의료 fallback 없이 세부정보를 숨긴 upstream error |
 | RAG admission full + source-dependent | 대기하지 않고 fresh `mcp_failure_final` L2 |
 | RAG admission full + non-source | 대기하지 않고 direct L2 |
 | MCP timeout/연결 실패 | frozen inbound + failure context의 fresh `mcp_failure_final` L2 |
 | live registry 누락·중복·schema drift | MCP call 없이 retrieval dependency error |
 | 잘못된 tool 이름/인자 | 실행하지 않고 구조화된 protocol error |
 | MCP 호출 예산 소진 | local finalizer만 허용하고 현재 evidence 상태로 종료 |
-| citation 없음·불일치 | fresh `clean_recovery_final` L2 1회; Python 답변 합성 금지 |
+| citation 없음·불일치 | fresh `clean_recovery_final` L2 1회; 계속 invalid이고 deadline이 남으면 `safe_completion_final`; Python 답변 합성 금지 |
 | streaming 요청 | 400 |
 
 ## KDCA ASP/KONAS source boundary

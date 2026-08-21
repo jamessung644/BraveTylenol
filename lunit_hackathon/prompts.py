@@ -51,6 +51,12 @@ def clean_recovery_final_system_prompt() -> str:
     return render_generation_phase_prompt("clean_recovery_final", current_date=date.today())
 
 
+def safe_completion_final_system_prompt() -> str:
+    """Render the fixed-input, single-use minimal safety completion prompt."""
+
+    return render_generation_phase_prompt("safe_completion_final", current_date=date.today())
+
+
 # Compatibility constants for callers that import prompt text directly. Generation
 # renders each phase per request so the trusted date cannot become stale.
 MEDICAL_GENERATION_SYSTEM_PROMPT = generation_system_prompt()
@@ -69,5 +75,6 @@ __all__ = [
     "RETRIEVAL_SYSTEM_PROMPT",
     "RETRIEVAL_PLANNER_SYSTEM_PROMPT",
     "RETRIEVE_RELEVANT_CONTENT_TOOL",
+    "safe_completion_final_system_prompt",
     "generation_system_prompt",
 ]

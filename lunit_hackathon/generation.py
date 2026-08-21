@@ -20,6 +20,7 @@ from lunit_hackathon.prompts import (
     generation_system_prompt,
     mcp_failure_final_system_prompt,
     post_retrieval_final_system_prompt,
+    safe_completion_final_system_prompt,
 )
 from lunit_hackathon.retrieval import is_official_drug_label_request
 from lunit_hackathon.schemas import (
@@ -39,14 +40,17 @@ _FORCED_TOOL_RETRY_TIMEOUT_SECONDS = 10.0
 _FINAL_GENERATION_TIMEOUT_SECONDS = 145.0
 _RECOVERY_TIMEOUT_SECONDS = 145.0
 _EMERGENCY_TIMEOUT_SECONDS = 145.0
+_SAFE_COMPLETION_TIMEOUT_SECONDS = 30.0
 _FINAL_MAX_TOKENS = 4_096
 _EMERGENCY_MAX_TOKENS = 2_048
+_SAFE_COMPLETION_MAX_TOKENS = 256
 # A clean retry must have enough room to replace any regular final that reached
 # its output limit. Keeping this tied to the regular cap prevents the retry from
 # being structurally more likely to truncate than the draft it replaces.
 _RECOVERY_MAX_TOKENS = _FINAL_MAX_TOKENS
 _FINAL_PHASES = ("direct", "post_retrieval", "mcp_failure", "emergency")
 FinalPhase = Literal["direct", "post_retrieval", "mcp_failure", "emergency"]
+SafeCompletionPhase = Literal["normal", "emergency"]
 _PROTOCOL_FUNCTION_NAMES = frozenset(
     (_RETRIEVAL_TOOL_NAME, "finalize_retrieval", *MCP_TOOL_ALIASES)
 )
@@ -266,19 +270,32 @@ class GenerationEngine:
             system_prompt=clean_recovery_final_system_prompt(),
             final_phase_context=final_context,
         )
-        recovered = await self._l2.complete(
-            messages=recovery_conversation,
-            attempt_timeout_seconds=_RECOVERY_TIMEOUT_SECONDS,
-            max_tokens=_RECOVERY_MAX_TOKENS,
-            allow_blank_recovery=False,
-            allow_empty_completion=False,
-        )
-        remaining = _final_violations(
-            recovered,
-            retrieval=retrieval,
-            phase=phase,
-        )
-        if remaining:
+        recovery_error: MalformedUpstreamResponseError | UpstreamTimeoutError | None = None
+        try:
+            recovered = await self._l2.complete(
+                messages=recovery_conversation,
+                attempt_timeout_seconds=_RECOVERY_TIMEOUT_SECONDS,
+                max_tokens=_RECOVERY_MAX_TOKENS,
+                allow_blank_recovery=False,
+                allow_empty_completion=False,
+            )
+        except (MalformedUpstreamResponseError, UpstreamTimeoutError) as error:
+            recovery_error = error
+            remaining = [
+                "recovery_timeout"
+                if isinstance(error, UpstreamTimeoutError)
+                else "recovery_malformed"
+            ]
+        else:
+            remaining = _final_violations(
+                recovered,
+                retrieval=retrieval,
+                phase=phase,
+            )
+        if not remaining:
+            return recovered.content or ""  # nonempty is established above
+
+        if recovery_error is None:
             if citation_omission_only and set(remaining) == {"missing_allowed_citation"}:
                 logger.warning(
                     "l2_final_citation_omitted_after_recovery phase=%s",
@@ -290,10 +307,41 @@ class GenerationEngine:
                 phase,
                 ",".join(remaining),
             )
+        else:
+            logger.warning(
+                "l2_final_recovery_failed phase=%s validator_codes=%s",
+                phase,
+                ",".join(remaining),
+            )
+
+        if not _safe_completion_permitted(self._l2):
+            if recovery_error is not None:
+                raise recovery_error
             raise MalformedUpstreamResponseError(
                 "L2 final answer remained invalid after bounded recovery"
             )
-        return recovered.content or ""  # nonempty is established above
+        return await self._safe_completion(emergency=phase == "emergency")
+
+    async def _safe_completion(self, *, emergency: bool) -> str:
+        """Ask L2 once for a fixed-input safety notice; never author it in Python."""
+
+        safe_phase: SafeCompletionPhase = "emergency" if emergency else "normal"
+        completion = await self._l2.complete(
+            messages=_safe_completion_conversation(safe_phase),
+            attempt_timeout_seconds=_SAFE_COMPLETION_TIMEOUT_SECONDS,
+            max_tokens=_SAFE_COMPLETION_MAX_TOKENS,
+            allow_blank_recovery=False,
+            allow_empty_completion=False,
+        )
+        violations = _safe_completion_violations(completion, phase=safe_phase)
+        if violations:
+            logger.warning(
+                "l2_safe_completion_invalid phase=%s validator_codes=%s",
+                safe_phase,
+                ",".join(violations),
+            )
+            raise MalformedUpstreamResponseError("L2 safe completion was invalid")
+        return completion.content or ""  # nonempty is established above
 
 
 def _medical_conversation(
@@ -323,22 +371,17 @@ def _medical_conversation(
         "application_context": {
             "schema_version": "conversation-context-v4",
             "trust_level": "untrusted_data",
+            "history_mode": "raw_history_only",
             "normalization_status": "degraded_raw_only",
             "state_integrity_status": "degraded_raw_only",
             "state_incomplete": True,
-            "omitted_turn_count": 0,
+            "do_not_infer_absence": True,
             "critical_unknowns": [
                 {
-                    "critical_unknown_id": "CU1",
-                    "subject_lineage_key": None,
-                    "domain": "derived_state",
-                    "semantic_path": None,
                     "reason_code": "derived_state_rebuild_failed",
-                    "source_span_refs": [],
                     "required_safety_handling": "avoid_reassurance",
                 }
             ],
-            "conversation_state": {},
         },
     }
     if final_phase_context is not None:
@@ -355,6 +398,27 @@ def _medical_conversation(
         raise MalformedUpstreamResponseError("Generation input encoding changed user text")
     conversation.append({"role": "user", "content": encoded})
     return conversation
+
+
+def _safe_completion_conversation(
+    phase: SafeCompletionPhase,
+) -> list[dict[str, Any]]:
+    """Build a fixed transcript containing no user medical content or prior draft."""
+
+    indicator = json.dumps(
+        {
+            "schema_version": "generation-safe-completion-v1",
+            "phase": phase,
+        },
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return [
+        {"role": "system", "content": safe_completion_final_system_prompt()},
+        {"role": "user", "content": indicator},
+    ]
 
 
 def _final_system_prompt(phase: FinalPhase) -> str:
@@ -1233,50 +1297,44 @@ def _evidence_json(result: RetrievalResult) -> str:
                 model_facing_content,
                 cite_uid=selected_cite_uid,
             )
-        items.append(
-            {
-                "citation_id": citation_id,
-                "relevance_score": item.relevance_score,
-                "claim_ids": [],
-                "relation": None,
-                "source_type": source_type,
-                "source_role": source_role,
-                "title": None,
-                "publisher": None,
-                "published_at": None,
-                "revised_at": None,
-                "effective_from": None,
-                "effective_to": None,
-                "jurisdiction_or_population": None,
-                "url": None,
-                "limitations": limitations,
-                # ``cite_uid`` belongs only to the request-local server ledger.
-                # The final model receives the stable numeric citation_id instead;
-                # otherwise it can copy an opaque UID that the output validator is
-                # required to reject.
-                "content": model_facing_content,
-            }
-        )
+        projected_item: dict[str, Any] = {
+            "citation_id": citation_id,
+            "relevance_score": item.relevance_score,
+            "limitations": limitations,
+            # ``cite_uid`` belongs only to the request-local server ledger. The
+            # final model receives the stable numeric citation_id instead.
+            "content": model_facing_content,
+        }
+        # Unknown/null catalog metadata carries no model-facing information. Keep
+        # verified classifications when present because they can materially change
+        # how the final L2 applies the evidence.
+        if source_type is not None:
+            projected_item["source_type"] = source_type
+        if source_role != "unknown":
+            projected_item["source_role"] = source_role
+        items.append(projected_item)
     payload = {
         "schema_version": "retrieval-evidence-v4",
         "selection_contract": "dashboard_v1",
         "claim_mapping_status": "not_available",
         "trust_level": "untrusted_evidence",
-        "retrieval_called": True,
         "evidence_status": evidence_status,
         "semantic_reason": semantic_reason,
         "execution_status": result.execution_status,
         "routing_status": result.routing_status,
         "source_normalization_status": source_normalization_status,
-        "source_normalization_reason_codes": source_normalization_reason_codes,
-        "retrieval_note": _model_facing_retrieval_note(
-            result.note,
-            cite_uids=selected_cite_uids,
-        ),
-        "claims": [],
-        "unresolved_claim_ids": [],
         "items": items,
     }
+    if source_normalization_reason_codes:
+        payload["source_normalization_reason_codes"] = (
+            source_normalization_reason_codes
+        )
+    retrieval_note = _model_facing_retrieval_note(
+        result.note,
+        cite_uids=selected_cite_uids,
+    )
+    if retrieval_note:
+        payload["retrieval_note"] = retrieval_note
     return json.dumps(
         payload,
         ensure_ascii=False,
@@ -1504,6 +1562,138 @@ def _final_violations(
     return violations
 
 
+def _safe_completion_permitted(l2_client: Any) -> bool:
+    """Fail closed when a client cannot prove that request deadline remains."""
+
+    remaining = getattr(l2_client, "remaining_request_seconds", None)
+    if not callable(remaining):
+        return False
+    try:
+        seconds = float(remaining())
+    except (TypeError, ValueError):
+        return False
+    return seconds > 0.0
+
+
+def _safe_completion_violations(
+    completion: L2Completion,
+    *,
+    phase: SafeCompletionPhase = "normal",
+) -> list[str]:
+    """Validate the minimal L2-authored notice without interpreting medicine."""
+
+    violations: list[str] = []
+    if completion.finish_reason not in (None, "stop"):
+        violations.append("invalid_finish_reason")
+    if completion.tool_calls:
+        violations.append("assistant_tool_calls")
+    content = completion.content
+    if content is None or not content.strip():
+        violations.append("blank_content")
+        return violations
+
+    normalized = unicodedata.normalize("NFKC", unquote(content)).casefold()
+    if _looks_like_tool_protocol(content):
+        violations.append("tool_protocol_text")
+    if re.search(r"\[\s*\d+\s*\]", normalized) or "cite_uid" in normalized:
+        violations.append("citation_token")
+    control_tokens = (
+        "generation-input-v1",
+        "generation-safe-completion-v1",
+        "application_context",
+        "final_phase_context",
+        "runtime_context",
+        "safe_completion_final",
+        '"schema_version"',
+        '"phase"',
+    )
+    if any(token in normalized for token in control_tokens) or re.search(
+        r"</?(?:system|assistant|user|runtime_context|phase)\b",
+        normalized,
+    ):
+        violations.append("control_token")
+    if (
+        normalized.lstrip().startswith(("{", "[", "```"))
+        or re.search(r"(?:^|\n)\s*[-*#•]\s+", normalized)
+    ):
+        violations.append("non_plain_format")
+    if re.search(r"[가-힣]", content) is None:
+        violations.append("non_korean_content")
+    sentence_count = len(
+        [
+            sentence
+            for sentence in re.findall(r"[^.!?。！？\r\n]+[.!?。！？]?", content)
+            if sentence.strip()
+        ]
+    )
+    if not 1 <= sentence_count <= 2:
+        violations.append("invalid_sentence_count")
+
+    diagnosis_disclaimer = re.search(
+        r"(?:의학적\s*)?진단.{0,18}(?:대신|대체).{0,10}(?:않|아니|없|못)|"
+        r"(?:의학적\s*)?진단.{0,14}(?:아니|효력.{0,6}없)",
+        normalized,
+    )
+    if diagnosis_disclaimer is None:
+        violations.append("missing_diagnosis_disclaimer")
+    if phase == "emergency":
+        emergency_destination = re.search(
+            r"(?:119|응급\s*(?:서비스|번호|실|의료)|구급|현지\s*응급)",
+            normalized,
+        )
+        emergency_action = re.search(
+            r"(?:연락|전화|호출|가(?:세|야|도록)|방문|도움)",
+            normalized,
+        )
+        emergency_urgency = re.search(
+            r"(?:즉시|바로|지금|당장|지체\s*없이)",
+            normalized,
+        )
+        delayed_emergency_action = re.search(
+            r"(?:나중|내일|며칠\s*후|다음\s*주|시간이\s*되면)",
+            normalized,
+        )
+        negated_emergency_action = re.search(
+            r"(?:119|응급\s*(?:서비스|번호|실|의료)|구급|현지\s*응급)"
+            r".{0,24}(?:연락|전화|호출|가(?:세|야|도록)|방문|도움)"
+            r".{0,12}(?:하지\s*마|하지\s*않|받지\s*마|말(?:라|아)|"
+            r"금지|불필요|피하|필요\s*(?:가\s*)?없)",
+            normalized,
+        )
+        if emergency_destination is None or emergency_action is None:
+            violations.append("missing_emergency_action")
+        elif negated_emergency_action is not None:
+            violations.append("negated_emergency_action")
+        if emergency_urgency is None or delayed_emergency_action is not None:
+            violations.append("missing_immediate_action")
+    else:
+        incomplete_notice = re.search(
+            r"(?:답변|안내|응답).{0,20}(?:완료|제공|검증|확인).{0,12}"
+            r"(?:못|어렵|불가)|"
+            r"(?:완료|제공|검증|확인).{0,12}(?:못|어렵|불가)",
+            normalized,
+        )
+        clinician_referral = re.search(
+            r"(?:의료진|의사|병원|의료기관|전문가).{0,20}"
+            r"(?:평가|진료|상담|확인|방문|찾)",
+            normalized,
+        )
+        negated_clinician_referral = re.search(
+            r"(?:의료진|의사|병원|의료기관|전문가).{0,24}"
+            r"(?:평가|진료|상담|확인|방문|찾).{0,12}"
+            r"(?:하지\s*마|하지\s*않|받지\s*마|말(?:라|아)|"
+            r"금지|불필요|피하|필요\s*(?:가\s*)?없)",
+            normalized,
+        )
+        if incomplete_notice is None:
+            violations.append("missing_incomplete_notice")
+        if clinician_referral is None:
+            violations.append("missing_clinician_referral")
+        elif negated_clinician_referral is not None:
+            violations.append("negated_clinician_referral")
+    return violations
+
+
 def _final_content(
     completion: L2Completion,
     *,
@@ -1588,7 +1778,7 @@ def _contains_unsupported_authoritative_claim(content: str) -> bool:
         r"근거.{0,16}(?:없|부족|확인)|알\s*수\s*없|단정할\s*수\s*없|"
         r"말씀드릴\s*수\s*없|제시할\s*수\s*없|검증되지\s*않|"
         r"불확실|달라질\s*수|문의|참조|확인해\s*(?:주|보)|"
-        r"could\s+not\s+verify|cannot\s+(?:confirm|state)|unverified|"
+        r"(?:cannot|could\s+not|unable\s+to)\s+(?:verify|confirm|state)|unverified|"
         r"uncertain|check\s+with|consult)"
     )
 

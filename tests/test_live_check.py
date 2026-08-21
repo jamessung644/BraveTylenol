@@ -147,6 +147,7 @@ async def test_live_canary_checks_exact_registry_strict_tools_and_read_only_mcp_
         "mcp_failure_final",
         "emergency_final",
         "clean_recovery_final",
+        "safe_completion_final",
     }
     assert all(len(digest) == 64 for digest in phase_hashes.values())
     assert report["release"]["generation_prompt_sha256"] == (

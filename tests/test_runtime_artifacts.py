@@ -24,6 +24,7 @@ from lunit_hackathon.artifacts import (
     POST_RETRIEVAL_FINAL_SYSTEM_PROMPT_TEMPLATE,
     RETRIEVAL_SYSTEM_PROMPT,
     RETRIEVE_RELEVANT_CONTENT_TOOL,
+    SAFE_COMPLETION_FINAL_SYSTEM_PROMPT_TEMPLATE,
     RuntimeArtifactError,
     load_runtime_artifacts,
     render_generation_phase_prompt,
@@ -124,7 +125,10 @@ def test_loader_rejects_any_bundle_byte_tampering(tmp_path):
         load_runtime_artifacts(copied)
 
 
-@pytest.mark.parametrize("phase", ["direct_final", "emergency_final"])
+@pytest.mark.parametrize(
+    "phase",
+    ["direct_final", "emergency_final", "safe_completion_final"],
+)
 def test_loader_rejects_hash_consistent_retired_control_in_final_prompt(tmp_path, phase):
     copied = tmp_path / BUNDLE.name
     manifest = json.loads(BUNDLE.read_text(encoding="utf-8"))
@@ -152,6 +156,10 @@ def test_loader_rejects_hash_consistent_retired_control_in_final_prompt(tmp_path
         (
             "당신은 시간 민감한 건강 위험이 의심되는 사용자에게 보여 줄 "
             "최종 답변을 작성한다."
+        ),
+        (
+            "당신은 정상 의료정보 답변과 그 재작성이 모두 완료되지 못했을 때 "
+            "사용할 최소 안전 고지만 작성한다."
         ),
     ],
 )
@@ -212,6 +220,7 @@ def test_only_trusted_runtime_tokens_survive_build_and_render_removes_them():
         "mcp_failure_final",
         "emergency_final",
         "clean_recovery_final",
+        "safe_completion_final",
     }
     assert all(
         set(_TOKEN.findall(template))
@@ -246,7 +255,20 @@ def test_each_generation_phase_renders_from_its_independent_template():
         current_date="2026-08-21",
     )
     assert "새 경구약" in recovery
-    assert "현장 응급상담원" in recovery
+    assert "응급상담원" in recovery
+    assert "구토 유도·음식·음료·중화제" in recovery
+    assert "새 경구 항히스타민제·스테로이드·용량" in recovery
+    assert "phase가 mcp_failure" in recovery
+
+    safe = render_generation_phase_prompt(
+        "safe_completion_final",
+        current_date="2026-08-21",
+    )
+    assert "[CURRENT_DATE]" in SAFE_COMPLETION_FINAL_SYSTEM_PROMPT_TEMPLATE
+    assert "기준일: 2026-08-21" in safe
+    assert "고정된 phase indicator만" in safe
+    assert "한국어 평문 1~2문장" in safe
+    assert "의학적 진단을 대신하지" in safe
 
     with pytest.raises(RuntimeArtifactError, match="phase"):
         render_generation_phase_prompt(
@@ -389,7 +411,7 @@ def test_all_final_phase_prompts_share_healthbench_aligned_answer_policy():
     final_templates = {
         phase: prompt
         for phase, prompt in GENERATION_PHASE_PROMPT_TEMPLATES.items()
-        if phase != "tool_decision"
+        if phase not in {"tool_decision", "safe_completion_final"}
     }
     required_contracts = (
         "정확성:",
@@ -430,9 +452,9 @@ def test_all_final_phase_prompts_share_healthbench_aligned_answer_policy():
     assert "전용 `근거` field 또는 section" in (
         POST_RETRIEVAL_FINAL_SYSTEM_PROMPT_TEMPLATE
     )
-    assert "전용 `근거` field 또는 section" in (
-        CLEAN_RECOVERY_FINAL_SYSTEM_PROMPT_TEMPLATE
-    )
+    assert "전용 `근거` field" in CLEAN_RECOVERY_FINAL_SYSTEM_PROMPT_TEMPLATE
+    assert "정확성:" not in SAFE_COMPLETION_FINAL_SYSTEM_PROMPT_TEMPLATE
+    assert len(SAFE_COMPLETION_FINAL_SYSTEM_PROMPT_TEMPLATE) <= 1_000
 
 
 def test_artifact_exposes_only_the_two_local_tools_and_no_final_answer_tool():

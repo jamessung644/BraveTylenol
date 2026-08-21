@@ -25,6 +25,7 @@ _GENERATION_PHASES = (
     "mcp_failure_final",
     "emergency_final",
     "clean_recovery_final",
+    "safe_completion_final",
 )
 _UPPER_TOKEN = re.compile(r"\[([A-Z][A-Z0-9_]+)\]")
 _LOCALE = re.compile(r"(?:unknown|[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*)\Z")
@@ -365,6 +366,9 @@ EMERGENCY_FINAL_SYSTEM_PROMPT_TEMPLATE = GENERATION_PHASE_PROMPT_TEMPLATES["emer
 CLEAN_RECOVERY_FINAL_SYSTEM_PROMPT_TEMPLATE = GENERATION_PHASE_PROMPT_TEMPLATES[
     "clean_recovery_final"
 ]
+SAFE_COMPLETION_FINAL_SYSTEM_PROMPT_TEMPLATE = GENERATION_PHASE_PROMPT_TEMPLATES[
+    "safe_completion_final"
+]
 RETRIEVAL_SYSTEM_PROMPT = RUNTIME_ARTIFACTS.retrieval_prompt
 RETRIEVE_RELEVANT_CONTENT_TOOL = RUNTIME_ARTIFACTS.local_tool("retrieve_relevant_content")
 FINALIZE_RETRIEVAL_TOOL = RUNTIME_ARTIFACTS.local_tool("finalize_retrieval")
@@ -392,6 +396,7 @@ __all__ = [
     "POST_RETRIEVAL_FINAL_SYSTEM_PROMPT_TEMPLATE",
     "RETRIEVAL_SYSTEM_PROMPT",
     "RETRIEVE_RELEVANT_CONTENT_TOOL",
+    "SAFE_COMPLETION_FINAL_SYSTEM_PROMPT_TEMPLATE",
     "RUNTIME_ARTIFACTS",
     "RuntimeArtifactError",
     "RuntimeArtifacts",

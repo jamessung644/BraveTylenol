@@ -82,11 +82,12 @@ system prompt를 붙이는 진단용이다.
 | Retrieval planner L2 | attempt당 25초 | MCP call 계획과 local finalization 단계; 동적 Retrieval 상한 안에서 동작 |
 | final Generation | 최대 145초, 최대 4,096 tokens | evidence/no-evidence 이후 사용자 답변; 남은 전체 요청 deadline 적용 |
 | clean final recovery | 최대 145초, 최대 4,096 tokens | final 검증 실패 또는 최초 final timeout 시 남은 전체 요청 deadline 안의 fresh no-tool 재작성 |
+| safe completion final | 최대 30초, 최대 256 tokens | initial final과 clean recovery가 모두 실패하고 deadline이 남은 경우 fixed indicator만으로 생성하는 L2 한국어 안전 고지; tool·retry 없음 |
 | RAG admission | 16개 | 공식 C16 cohort를 수용하고 초과 요청은 즉시 하향 |
 | MCP remote call | 기본 3회, release ceiling 3회 | 실제 호출은 도메인 ceiling 1~3회로 제한 |
 | L2 동시 호출 | 16개 | CoEval 동시성에 맞춘 upstream 보호 |
 | MCP 동시 연결 | 16개 | connection/session 점유 제한 |
-| 요청 completion 상한 | 최대 4,096 tokens | decision/planner는 1,536, 일반 final·복구는 4,096, 응급은 2,048로 phase별 제한 |
+| 요청 completion 상한 | 최대 4,096 tokens | decision/planner는 1,536, 일반 final·복구는 4,096, 응급은 2,048, safe completion은 256으로 phase별 제한 |
 
 각 phase timeout에는 model semaphore 대기시간도 포함된다. `tool_decision`의 출력은 사용자에게
 반환하지 않는다. `direct_final`, `post_retrieval_final`, `mcp_failure_final`, `emergency_final`은
@@ -96,8 +97,16 @@ tool protocol·citation 검증에 실패하면 invalid draft를 포함하지 않
 normal Retrieval route를 새로 시작하지 않는다. 이 no-evidence 응급 phase는 실제로 조회하지 않은
 최신·공식 출처·URL·학회·저널·법령을 확인했다고 단정하거나 새 경구약·구체 용량을 시작하라는
 출력을 거부한다. 출혈 안내는 지속 직접압박과 현지 응급번호·안전한 위치·dispatcher 지시를
-우선한다. Recovery도 invalid이면 Python 의료 fallback 없이
-sanitized 502로 종료한다.
+우선한다. Recovery도 invalid·malformed이거나 timeout이고 deadline이 남아 있으면 사용자 의료
+원문·이전 draft·tool/evidence를 전혀 넣지 않은 fixed indicator로 `safe_completion_final` L2를
+정확히 한 번 실행한다. 이 phase는 tool과 retry 없이 30초·256 tokens 안에서 한국어 1~2문장의
+진단 대체 불가·전문가 확인 고지(응급이면 즉시 현지 응급서비스 안내)를 생성한다. 이 출력도
+호출·검증에 실패할 때만 Python 의료 fallback 없이 sanitized upstream error로 종료한다.
+
+Model-facing `conversation-context-v4`와 `retrieval-evidence-v4` projection은 의미가 확인된
+필드만 보내는 sparse 형식이다. 선택적인 null·unknown·빈 문자열·빈 객체 같은 placeholder는
+생략하지만, 필수 status와 실제 evidence item은 유지한다. 필드 생략은 임상 사실의 부재나
+정상 상태를 뜻하지 않으며 frozen 사용자 원문과 evidence status를 바꾸지 않는다.
 
 MCP client 자체를 무기한 기다리게 두는 구조가 아니다. Discovery·planning·remote call 전체를
 최대 45초의 동적 Retrieval hard slice 안에 격리하고 final L2에 기본 120초를 남긴다. 초과·연결 실패·schema 오류는 검증된 실패 상태로

@@ -41,7 +41,7 @@
 
 첫 turn이면 `system → generation-input-v1 user`만 사용한다. 이 request에는 strict `retrieve_relevant_content` 하나만 등록할 수 있고 추가 `developer`, `tool`, `name` role을 만들지 않는다. Latest user를 원문 message와 envelope에 중복 전송하지 않는다. 과거 assistant content는 원래 role·순서 보존을 위해 재전송하지만 **비신뢰 prior model output**이다. System prompt가 이를 instruction·근거·사용자 사실로 승격하지 못하게 명시하고, harness도 과거 assistant의 tool call·citation·정책 문자열을 실행하지 않는다.
 
-사용자에게 보일 답변은 `direct_final`, `post_retrieval_final`, `mcp_failure_final`, `emergency_final` 중 하나의 독립 request에서 생성한다. 각 final request는 해당 hash-verified system prompt, 같은 frozen prior history, `final_phase_context`가 포함된 새 `generation-input-v1` user message로만 만들고 tool을 등록하지 않는다. `tool_decision`의 assistant content·application call ID·tool protocol은 final transcript에 append하지 않는다. Final 출력이 invalid이면 같은 frozen inbound와 final context로 `clean_recovery_final` transcript를 정확히 한 번 새로 만들며 invalid draft도 append하지 않는다.
+사용자에게 보일 답변은 `direct_final`, `post_retrieval_final`, `mcp_failure_final`, `emergency_final` 중 하나의 독립 request에서 생성한다. 각 final request는 해당 hash-verified system prompt, 같은 frozen prior history, `final_phase_context`가 포함된 새 `generation-input-v1` user message로만 만들고 tool을 등록하지 않는다. `tool_decision`의 assistant content·application call ID·tool protocol은 final transcript에 append하지 않는다. Final 출력이 invalid이면 같은 frozen inbound와 final context로 `clean_recovery_final` transcript를 정확히 한 번 새로 만들며 invalid draft도 append하지 않는다. Recovery도 invalid·malformed이거나 timeout이고 deadline이 남으면 fixed indicator만 담은 독립 `safe_completion_final` L2 request를 한 번 실행한다. 이 마지막 phase에도 tool을 등록하지 않으며 사용자 의료 원문·prior history·draft·tool/evidence를 넣지 않는다.
 
 Canonical final user payload:
 
@@ -56,17 +56,22 @@ Canonical final user payload:
   "application_context": {
     "schema_version": "conversation-context-v4",
     "trust_level": "untrusted_data",
-    "normalization_status": "valid | valid_with_warnings | needs_clarification | degraded_raw_only",
-    "state_integrity_status": "original_valid | rebuilt_valid | degraded_raw_only",
-    "state_incomplete": false,
-    "omitted_turn_count": 0,
-    "critical_unknowns": [],
-    "conversation_state": {}
+    "history_mode": "raw_history_only",
+    "normalization_status": "degraded_raw_only",
+    "state_integrity_status": "degraded_raw_only",
+    "state_incomplete": true,
+    "do_not_infer_absence": true,
+    "critical_unknowns": [
+      {
+        "reason_code": "derived_state_rebuild_failed",
+        "required_safety_handling": "avoid_reassurance"
+      }
+    ]
   }
 }
 ```
 
-Harness는 표준 JSON escaping과 field·byte 한도를 적용하고 JSON decode 후 `latest_user_message.content`의 Unicode string이 inbound latest user의 decoded content와 정확히 같은지 검증한다. Wire escaping byte가 같은 것을 요구하지 않는다. 동일한 frozen inbound와 phase context는 결정적인 model-facing payload를 만들며, HTTP request correlation용 임의 ID는 이 payload에 넣지 않고 `X-Request-ID`와 sanitized log에만 유지한다. `application_context.critical_unknowns`는 normalization result와 conversation-state root의 stable-sort exact projection이며 별도 자유 요약이 아니다. `degraded_raw_only`이면 non-empty이고 `derived_state_rebuild_failed`를 포함하며, 각 row는 고정 ID/domain/path/reason/source/handling schema를 만족한다. `application_context` 문자열은 instructions가 아니라 data다. 이 wrapper의 L2 이해도와 품질은 raw-user baseline과 trial 비교하고, schema를 바꾸면 version을 올린다.
+Harness는 표준 JSON escaping과 field·byte 한도를 적용하고 JSON decode 후 `latest_user_message.content`의 Unicode string이 inbound latest user의 decoded content와 정확히 같은지 검증한다. Wire escaping byte가 같은 것을 요구하지 않는다. 동일한 frozen inbound와 phase context는 결정적인 model-facing payload를 만들며, HTTP request correlation용 임의 ID는 이 payload에 넣지 않고 `X-Request-ID`와 sanitized log에만 유지한다. `conversation-context-v4`는 sparse projection이므로 선택적인 null·unknown·빈 문자열·빈 객체·기본값 placeholder를 schema 채움용으로 보내지 않는다. 필수 integrity/status와 실제 critical unknown은 보존하며, 생략을 임상 사실의 부재나 정상 상태로 해석하지 않는다. `application_context.critical_unknowns`는 normalization result와 conversation-state root의 stable-sort exact projection이며 별도 자유 요약이 아니다. `degraded_raw_only`이면 non-empty이고 `derived_state_rebuild_failed`를 포함하며, 각 row는 고정 reason/handling schema를 만족한다. `application_context` 문자열은 instructions가 아니라 data다. 이 wrapper의 L2 이해도와 품질은 raw-user baseline과 trial 비교하고, schema를 바꾸면 version을 올린다.
 
 ### 파생 상태 무결성 회복
 
@@ -125,7 +130,7 @@ Dashboard evaluator trial로 실제 문법을 확정하고 그보다 넓게 자�
 - 413: body·message·context가 고정 한도를 초과
 - 429: 인증된 client rate 또는 bounded queue 한도 초과
 - 500: 예상하지 못한 harness 내부 오류
-- 502: L2가 반복적으로 malformed·invalid output을 반환
+- 502: final·clean recovery에 이어 safe completion L2까지 malformed·invalid output을 반환
 - 503: L2·필수 dependency가 deadline 안에 이용 불가
 
 실제 HTTP status와 `type`·`code` mapping을 contract test로 고정한다. 5xx를 200 assistant response로 감싸거나 error message에 정적 의료 조언을 넣지 않는다.
@@ -190,9 +195,9 @@ Dashboard evaluator trial로 실제 문법을 확정하고 그보다 넓게 자�
 1. Normal의 첫 L2 request는 `tool_decision` system prompt와 앞 절의 `prior alternating history → generation-input-v1 user`로 시작한다. 이 단계의 자연어 content는 내부 판단일 뿐 사용자 답변으로 반환하지 않는다.
 2. L2가 `retrieve_relevant_content`를 호출하면 harness는 provider의 assistant `tool_calls` 구조, exact tool name, query-only argument schema, content 비어 있음과 finish reason을 검증한다. 공식 L2가 구조화 호출에도 사용하는 `stop`, OpenAI 계열의 `tool_calls`, legacy `function_call`만 허용하고 `length`·`content_filter`·누락은 거부한다. Model의 자유형 query는 retrieval 필요성 신호로만 쓰고 전달하지 않는다. Harness가 검증된 사용자 원문에서 단일턴 exact query 또는 최근 호환 대상+지시어 제거 follow-up projection을 결정적으로 만든다. 혼합 content, unknown·parallel tool, 불명확한 대상·식별정보 query는 실행하지 않는다.
 3. Valid tool call 뒤에만 별도 Retrieval L2 pipeline을 실행한다. Application call의 assistant message와 call ID는 Retrieval transcript나 final transcript로 복사하지 않는다. Retrieval L2의 MCP call/result binding은 아래 절의 독립 계약을 따른다.
-4. Tool call이 없으면 frozen inbound에서 fresh `direct_final` no-tool request를 만든다. Retrieval이 성공하면 검증·freeze된 `retrieval-evidence-v4`를 final context에 넣은 fresh `post_retrieval_final` no-tool request를 만들고, 실패하면 근거나 UID를 합성하지 않은 fresh `mcp_failure_final` no-tool request를 만든다. Transport execution이 성공했어도 sanitizer 뒤 item content가 비어 있으면 숫자 citation을 부여하지 않고 `evidence_status=none`으로 단조 하향한다.
+4. Tool call이 없으면 frozen inbound에서 fresh `direct_final` no-tool request를 만든다. Retrieval이 성공하면 검증·freeze된 `retrieval-evidence-v4`를 final context에 넣은 fresh `post_retrieval_final` no-tool request를 만들고, 실패하면 근거나 UID를 합성하지 않은 fresh `mcp_failure_final` no-tool request를 만든다. `retrieval-evidence-v4`는 필수 status와 citable item은 유지하되 검증되지 않은 null/unknown source metadata, 빈 reason-code 목록과 빈 note 같은 선택적 placeholder를 생략하는 sparse model-facing projection이다. 생략은 source 검증 완료나 사실 부재를 뜻하지 않는다. Transport execution이 성공했어도 sanitizer 뒤 item content가 비어 있으면 숫자 citation을 부여하지 않고 `evidence_status=none`으로 단조 하향한다.
 5. Tool-decision의 forced-call retry와 Retrieval budget은 release config에 고정한다. 반복·budget 초과·tool protocol 오류는 근거 실패로 단조 하향할 수 있지만 harness가 의료문으로 바꾸지 않는다. 어느 final phase에서도 tool call, pseudo tool syntax, local function 2개와 MCP alias 21개를 합한 등록 function name의 노출은 invalid model output이다.
-6. 최종 assistant text만 client에 반환한다. 허용 citation은 현재 final context의 frozen evidence에만 결합하며 첫 response byte 전에 finish reason·공백·tool protocol·citation을 모두 검증한다. `mcp_failure_final` 또는 인용 가능한 item이 없는 `post_retrieval_final`에서 공식·현행·제품 라벨상 임상 수치, 조문·시행일, 공식 코드·금기·급여 조건, 검사·모니터링·추적 일정의 단정적 출력을 감지하면 답변을 고쳐 쓰지 않고 invalid로 판정한다. Invalid이면 아래 clean recovery를 한 번만 실행한다.
+6. 최종 assistant text만 client에 반환한다. 허용 citation은 현재 final context의 frozen evidence에만 결합하며 첫 response byte 전에 finish reason·공백·tool protocol·citation을 모두 검증한다. `mcp_failure_final` 또는 인용 가능한 item이 없는 `post_retrieval_final`에서 공식·현행·제품 라벨상 임상 수치, 조문·시행일, 공식 코드·금기·급여 조건, 검사·모니터링·추적 일정의 단정적 출력을 감지하면 답변을 고쳐 쓰지 않고 invalid로 판정한다. Invalid이면 아래 clean recovery를 한 번만 실행하고, 그것도 실패한 경우에만 deadline이 남을 때 safe completion으로 진행한다.
 
 합법적인 `tool_decision` call 자체는 `tool-only` fault가 아니다. 다만 그 raw assistant message나 tool JSON은 절대 user-visible text가 아니며, no-tool final phase의 application tool call은 즉시 invalid output이다.
 
@@ -223,16 +228,19 @@ Dashboard evaluator trial로 실제 문법을 확정하고 그보다 넓게 자�
 - Emergency prompt는 현재 위험과 부정·과거 종료·인용·가상 상황을 원문에서 독립적으로 구분한다. Guard 오탐도 내부 control JSON이나 normal route 전환 없이 사용자에게 보일 자연어로 직접 답한다.
 - 현재 위험이면 현지 응급번호(대한민국 위치 확인 시 119), 즉각 행동, 추가 위험을 피한 안전한 위치, 응급상담원·구급대원 지시를 앞세운다. 통제되지 않는 외부 출혈은 지속적인 직접 압박을 중심으로 하며 검증되지 않은 지혈대·사지 올리기·자가 약 세부를 만들지 않는다.
 - `evidence_status=not_requested`이므로 최신·공식 출처나 URL, 학회·저널, 법령을 조회했다고 단정하거나 새 경구약·구체 용량을 시작하도록 지시한 출력은 invalid다. 이미 처방된 rescue plan 또는 현장 dispatcher의 명시적 지시를 따르는 표현만 보수적으로 예외로 한다.
-- 첫 response byte 전에 finish reason·공백·tool protocol을 검증한다. Valid text만 반환하고 invalid이면 아래 공통 clean recovery를 정확히 한 번 실행한다.
-- Harness는 응급 답변을 이어 붙이거나 보완하지 않고, final 또는 recovery L2가 생성한 한 개의 valid text만 반환한다.
+- 첫 response byte 전에 finish reason·공백·tool protocol을 검증한다. Valid text만 반환하고 invalid이면 아래 공통 clean recovery를 정확히 한 번 실행한다. Recovery도 실패하면 deadline이 남는 경우에만 fixed-indicator safe completion으로 진행한다.
+- Harness는 응급 답변을 이어 붙이거나 보완하지 않고, final·recovery 또는 safe-completion L2가 생성한 한 개의 valid text만 반환한다.
 
-### Clean final recovery
+### Clean final recovery와 safe completion
 
 - 이 recovery는 `direct_final`, `post_retrieval_final`, `mcp_failure_final`, `emergency_final`의 결정적 invalid output 또는 최초 final L2 timeout에 공통으로 최대 한 번 적용한다. Final과 recovery의 개별 attempt ceiling은 최대 145초지만 둘을 더한 별도 예산이 아니며, 같은 request-scoped absolute deadline에서 앞 단계가 사용하고 남은 시간만 허용한다. Recovery token ceiling은 일반 final과 같은 4,096으로 두어 최초 length 실패보다 구조적으로 더 잘리지 않게 하며 client 내부 retry를 사용하지 않는다.
 - Empty content, 허용되지 않은 finish reason, tool call·pseudo tool syntax·등록된 function name 노출, 존재하지 않는 citation, no-evidence phase의 단정적 권위 주장 등 첫 response byte 전에 판정 가능한 위반만 대상으로 한다.
 - Harness는 invalid draft와 tool-decision transcript를 폐기하고 Retrieval을 다시 실행하지 않는다. 같은 frozen evaluator history, latest user, application context와 trusted final-phase context로 fresh `clean_recovery_final` request를 만들며 tool을 등록하지 않는다.
 - Recovery transcript에는 이전 assistant draft, application/MCP tool call·result, validator feedback용 자유형 의료문을 append하지 않는다. Frozen evidence가 있으면 final context의 검증된 숫자 citation만 다시 사용할 수 있다.
-- Recovery도 finish reason·공백·tool protocol·잘못된 citation ID·내부 식별자 노출을 위반하면 502, recovery L2도 deadline 안에 응답하지 않으면 504다. 유효한 숫자 citation을 두 번 연속 생략한 것만 남은 경우에는 Python이 인용을 합성하지 않고 두 번째 L2 원문을 반환하되 safe telemetry에 omission을 기록한다. Client에 첫 response byte를 보낸 뒤에는 recovery하지 않는다.
+- 유효한 숫자 citation을 두 번 연속 생략한 것만 남은 경우에는 Python이 인용을 합성하지 않고 두 번째 L2 원문을 반환하되 safe telemetry에 omission을 기록한다. 그 밖에 recovery도 finish reason·공백·tool protocol·잘못된 citation ID·내부 식별자 노출을 위반하거나 malformed/timeout이고 request deadline이 남으면 `safe_completion_final`을 정확히 한 번 실행한다.
+- `safe_completion_final`의 system prompt와 transcript는 다른 final/recovery와 분리한다. User message는 `{schema_version: generation-safe-completion-v1, phase: normal|emergency}`의 fixed indicator뿐이며 사용자 의료 원문, prior history, invalid draft, validator 의료문, tool/evidence를 넣지 않는다. Tool은 등록하지 않고 client retry도 사용하지 않으며 attempt ceiling은 30초, completion ceiling은 256 tokens다.
+- Safe completion L2는 normal이면 안전하게 검증된 답을 완료하지 못했음·진단 대체 불가·의료 전문가 확인을, emergency이면 그 내용과 즉시 현지 응급서비스/응급실 안내를 한국어 1~2문장으로 작성한다. Harness는 non-empty, `stop`/미지정 finish reason, no tool/protocol/citation/control/JSON/list, 한국어, 1~2문장 조건을 검증한다.
+- Safe completion 출력도 invalid·malformed이거나 timeout이면 Python 의료 fallback 없이 sanitized upstream error를 반환한다. Client에 첫 response byte를 보낸 뒤에는 recovery나 safe completion을 실행하지 않는다.
 
 ## Citation 무결성
 
@@ -264,10 +272,11 @@ Harness는 의료 문장을 새로 쓰거나 L2 text를 post-edit하지 않는�
 | 일부 retrieval source 실패 | 다른 승인 source 또는 `partial`과 semantic·execution status |
 | 전체 retrieval 실패 | `evidence_status="unavailable"`과 sanitized reason code를 fresh `mcp_failure_final` context에 전달 |
 | Initial final phase의 timeout·empty·bad finish reason·tool protocol 노출 | frozen inbound와 같은 final context로 fresh clean recovery 1회 |
-| Emergency final의 application tool call·pseudo tool syntax·invalid output | 같은 no-tool clean recovery 1회; 반복 시 OpenAI-style 502 |
+| Emergency final의 application tool call·pseudo tool syntax·invalid output | 같은 no-tool clean recovery 1회; 계속 실패하고 deadline이 남으면 emergency fixed-indicator safe completion 1회 |
 | 잘못된 citation·필수 안전구조 누락 | 원문 post-edit 없이 fresh clean recovery 1회 |
-| Recovery도 invalid | 비-L2 의료 답변을 만들지 않고 sanitized OpenAI-style 502 |
-| L2 timeout·인증 실패 | 비-L2 의료 답변을 만들지 않고 OpenAI-style 504·503 |
+| Recovery도 invalid·malformed이거나 timeout | deadline이 남으면 user/draft/tool/evidence 없는 fixed-indicator `safe_completion_final` L2 1회 |
+| Safe completion도 invalid·malformed이거나 timeout | 비-L2 의료 답변을 만들지 않고 sanitized OpenAI-style 502·504 |
+| L2 인증·전송 실패 | 비-L2 의료 답변을 만들지 않고 OpenAI-style 503·502 |
 | Harness 내부 예외 | PHI 없는 error ID를 가진 OpenAI-style 500 |
 
 HTTP error object는 assistant 의료 응답이 아니므로 “최종 출력 L2” 규칙을 위반하지 않는다. Product UI가 정적 장애 안내를 표시할 수 있지만 `/v1/chat/completions`의 assistant content로 위장하지 않는다.
@@ -293,4 +302,4 @@ HTTP error object는 assistant 의료 응답이 아니므로 “최종 출력 L2
 
 ## 관찰 가능성
 
-Trace에는 request ID, model·phase prompt hash·taxonomy·state·tool schema·corpus version, deadline, retry, selected citation hash, compaction, validator·fallback·clean-recovery event를 남긴다. API key, full prompt, invalid draft, raw tool protocol, 불필요한 원문 건강정보와 stack trace는 남기지 않는다.
+Trace에는 request ID, model·phase prompt hash·taxonomy·state·tool schema·corpus version, deadline, retry, selected citation hash, compaction, validator·fallback·clean-recovery·safe-completion event를 남긴다. API key, full prompt, invalid draft, raw tool protocol, 불필요한 원문 건강정보와 stack trace는 남기지 않는다.

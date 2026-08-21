@@ -37,6 +37,15 @@ class ScriptedL2:
         return completion
 
 
+class BudgetedScriptedL2(ScriptedL2):
+    def __init__(self, completions, *, remaining_seconds=30.0):
+        super().__init__(completions)
+        self.remaining_seconds = remaining_seconds
+
+    def remaining_request_seconds(self):
+        return self.remaining_seconds
+
+
 class FakeRetrieval:
     def __init__(self, result=None):
         self.queries = []
@@ -353,8 +362,103 @@ async def test_generation_retrieves_then_resumes_same_trajectory_without_more_to
     assert "cite_uid" not in evidence["items"][0]
     evidence_content = json.loads(evidence["items"][0]["content"])
     assert evidence_content == {"text": "근거"}
-    assert evidence["items"][0]["claim_ids"] == []
-    assert evidence["items"][0]["relation"] is None
+    assert "claim_ids" not in evidence["items"][0]
+    assert "relation" not in evidence["items"][0]
+
+
+def test_generation_envelope_compacts_fixed_metadata_without_losing_raw_context():
+    messages = [
+        ChatMessage(role="user", content="아스피린을 복용 중입니다."),
+        ChatMessage(role="assistant", content="현재 증상을 알려주세요."),
+        ChatMessage(role="user", content="지금은 출혈이 없어요."),
+    ]
+
+    conversation = generation_module._medical_conversation(
+        messages,
+        system_prompt="final",
+        final_phase_context=generation_module._final_phase_context(
+            "direct",
+            retrieval=None,
+            failure_reason=None,
+        ),
+    )
+    envelope_text = conversation[-1]["content"]
+    envelope = json.loads(envelope_text)
+
+    assert [message["role"] for message in conversation] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert conversation[1]["content"] == messages[0].content
+    assert conversation[2]["content"] == messages[1].content
+    assert envelope["latest_user_message"] == {
+        "turn_index": 2,
+        "content": messages[2].content,
+    }
+    context = envelope["application_context"]
+    assert context["history_mode"] == "raw_history_only"
+    assert context["normalization_status"] == "degraded_raw_only"
+    assert context["state_integrity_status"] == "degraded_raw_only"
+    assert context["state_incomplete"] is True
+    assert context["do_not_infer_absence"] is True
+    assert context["critical_unknowns"] == [
+        {
+            "reason_code": "derived_state_rebuild_failed",
+            "required_safety_handling": "avoid_reassurance",
+        }
+    ]
+    assert "conversation_state" not in context
+    assert "omitted_turn_count" not in context
+    assert len(envelope_text) <= 670
+
+
+def test_evidence_projection_omits_empty_metadata_but_keeps_material_limits():
+    retrieval = RetrievalResult(
+        status="partial",
+        items=[
+            EvidenceItem(
+                cite_uid="mfds:one",
+                source_tool="openapi_mfds_get_drug_indication",
+                relevance_score=0.8,
+                content=json.dumps(
+                    {
+                        "cite_uid": "mfds:one",
+                        "text": "허가 적응증 근거",
+                        "truncated": True,
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        ],
+        note="대상 제품 확인 필요",
+        semantic_reason="coverage_gap",
+    )
+
+    evidence_text = generation_module._evidence_json(retrieval)
+    evidence = json.loads(evidence_text)
+    item = evidence["items"][0]
+
+    assert evidence["evidence_status"] == "partial"
+    assert evidence["semantic_reason"] == "coverage_gap"
+    assert evidence["execution_status"] == "ok"
+    assert evidence["retrieval_note"] == "대상 제품 확인 필요"
+    assert item["citation_id"] == 1
+    assert "허가 적응증 근거" in item["content"]
+    assert item["source_type"] == "mfds"
+    assert item["source_role"] == "regulatory_or_operational_authority"
+    assert item["limitations"] == [
+        "source_metadata_unavailable",
+        "content_truncated",
+    ]
+    assert "cite_uid" not in item
+    assert "claim_ids" not in item
+    assert "relation" not in item
+    assert "title" not in item
+    assert "publisher" not in item
+    assert "url" not in item
+    assert len(evidence_text) <= 670
 
 
 def test_model_facing_evidence_scrubs_nested_ledger_ids_but_keeps_public_code():
@@ -2046,6 +2150,191 @@ async def test_nonstop_finish_reason_twice_fails_closed():
     assert [call["max_tokens"] for call in l2.calls] == [4_096, 4_096]
 
 
+@pytest.mark.parametrize(
+    ("question", "emergency", "safe_answer"),
+    [
+        (
+            "일반적인 건강 질문",
+            False,
+            "안전하게 검증된 답변을 이번 시도에서 완료하지 못했습니다. "
+            "본 안내는 의학적 진단을 대신하지 않으므로 의료진에게 직접 평가받으세요.",
+        ),
+        (
+            "숨을 못 쉬고 입술이 파래요",
+            True,
+            "즉시 현지 응급서비스에 연락하거나 가까운 응급실로 가세요. "
+            "본 안내는 의학적 진단을 대신하지 않습니다.",
+        ),
+    ],
+)
+async def test_invalid_final_and_recovery_use_fixed_input_safe_completion_once(
+    question,
+    emergency,
+    safe_answer,
+):
+    invalid = "retrieve_relevant_content"
+    l2 = BudgetedScriptedL2(
+        [
+            L2Completion(content=invalid),
+            L2Completion(content=invalid),
+            L2Completion(content=safe_answer, finish_reason="stop"),
+        ]
+    )
+
+    answer = await GenerationEngine(l2, None).direct_answer(
+        [ChatMessage(role="user", content=question)],
+        emergency=emergency,
+    )
+
+    assert answer == safe_answer
+    safe_call = l2.calls[2]
+    assert safe_call["attempt_timeout_seconds"] == 30
+    assert safe_call["max_tokens"] == 256
+    assert safe_call["allow_blank_recovery"] is False
+    assert safe_call["allow_empty_completion"] is False
+    assert "tools" not in safe_call
+    assert len(safe_call["messages"]) == 2
+    indicator = json.loads(safe_call["messages"][1]["content"])
+    assert indicator == {
+        "schema_version": "generation-safe-completion-v1",
+        "phase": "emergency" if emergency else "normal",
+    }
+    safe_dump = json.dumps(safe_call["messages"], ensure_ascii=False)
+    assert question not in safe_dump
+    assert invalid not in safe_dump
+    assert "evidence" not in indicator
+
+
+async def test_recovery_timeout_uses_safe_completion_when_deadline_remains():
+    safe_answer = (
+        "안전하게 검증된 답변을 이번 시도에서 완료하지 못했습니다. "
+        "본 안내는 의학적 진단을 대신하지 않으므로 의료진에게 직접 평가받으세요."
+    )
+
+    class RecoveryTimeoutThenSafe(BudgetedScriptedL2):
+        async def complete(self, **kwargs):
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                return L2Completion(content="retrieve_relevant_content")
+            if len(self.calls) == 2:
+                raise UpstreamTimeoutError("synthetic recovery timeout")
+            return L2Completion(content=safe_answer, finish_reason="stop")
+
+    l2 = RecoveryTimeoutThenSafe([])
+
+    assert await GenerationEngine(l2, None).direct_answer(
+        [ChatMessage(role="user", content="질문")]
+    ) == safe_answer
+    assert len(l2.calls) == 3
+
+
+@pytest.mark.parametrize(
+    "completion",
+    [
+        L2Completion(content="", finish_reason="stop"),
+        L2Completion(content="한국어 고지입니다.", finish_reason="length"),
+        L2Completion(content="<tool_calls>bad</tool_calls>", finish_reason="stop"),
+        L2Completion(content="근거 [1]을 보세요.", finish_reason="stop"),
+        L2Completion(content='{"phase":"normal"}', finish_reason="stop"),
+        L2Completion(content="English only.", finish_reason="stop"),
+        L2Completion(content="첫 문장. 둘째 문장. 셋째 문장.", finish_reason="stop"),
+        L2Completion(content="괜찮습니다.", finish_reason="stop"),
+        L2Completion(
+            content="본 안내는 의학적 진단을 대신하지 않습니다.",
+            finish_reason="stop",
+        ),
+    ],
+)
+def test_safe_completion_validator_rejects_nonminimal_output(completion):
+    assert generation_module._safe_completion_violations(completion)
+
+
+def test_emergency_safe_completion_requires_immediate_emergency_action():
+    completion = L2Completion(
+        content=(
+            "안전하게 검증된 답변을 완료하지 못했습니다. "
+            "본 안내는 의학적 진단을 대신하지 않습니다."
+        ),
+        finish_reason="stop",
+    )
+
+    assert "missing_emergency_action" in generation_module._safe_completion_violations(
+        completion,
+        phase="emergency",
+    )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "119에 연락하지 마세요. 본 안내는 의학적 진단을 대신하지 않습니다.",
+        "응급실을 방문하지 마세요. 본 안내는 의학적 진단을 대신하지 않습니다.",
+        "119 연락은 불필요합니다. 본 안내는 의학적 진단을 대신하지 않습니다.",
+        "응급실 방문은 피하세요. 본 안내는 의학적 진단을 대신하지 않습니다.",
+    ],
+)
+def test_emergency_safe_completion_rejects_negated_action(content):
+    violations = generation_module._safe_completion_violations(
+        L2Completion(content=content, finish_reason="stop"),
+        phase="emergency",
+    )
+
+    assert "negated_emergency_action" in violations
+
+
+def test_emergency_safe_completion_rejects_delayed_action():
+    violations = generation_module._safe_completion_violations(
+        L2Completion(
+            content=(
+                "내일 응급실을 방문하세요. "
+                "본 안내는 의학적 진단을 대신하지 않습니다."
+            ),
+            finish_reason="stop",
+        ),
+        phase="emergency",
+    )
+
+    assert "missing_immediate_action" in violations
+
+
+def test_normal_safe_completion_rejects_negated_referral_or_positive_diagnosis():
+    negated_referral = L2Completion(
+        content=(
+            "답변을 완료하지 못했습니다. 의료진에게 상담하지 마세요; "
+            "본 안내는 의학적 진단을 대신하지 않습니다."
+        ),
+        finish_reason="stop",
+    )
+    positive_diagnosis = L2Completion(
+        content=(
+            "답변을 완료하지 못했습니다. 의료진에게 상담하세요; "
+            "본 안내는 의학적 진단에 효력이 있습니다."
+        ),
+        finish_reason="stop",
+    )
+
+    assert "negated_clinician_referral" in (
+        generation_module._safe_completion_violations(negated_referral)
+    )
+    assert "missing_diagnosis_disclaimer" in (
+        generation_module._safe_completion_violations(positive_diagnosis)
+    )
+
+
+def test_normal_safe_completion_rejects_indirect_negated_referral():
+    completion = L2Completion(
+        content=(
+            "답변을 완료하지 못했습니다. 의료진 상담은 받지 마세요; "
+            "본 안내는 의학적 진단을 대신하지 않습니다."
+        ),
+        finish_reason="stop",
+    )
+
+    assert "negated_clinician_referral" in (
+        generation_module._safe_completion_violations(completion)
+    )
+
+
 async def test_final_tool_calls_twice_fail_closed_after_one_recovery():
     invalid_call = tool_call(
         "unexpected",
@@ -2264,6 +2553,24 @@ def test_no_evidence_guard_does_not_match_is_inside_pharmacist():
     )
 
     assert generation_module._contains_unsupported_authoritative_claim(limitation) is False
+
+
+@pytest.mark.parametrize(
+    "limitation",
+    [
+        "I cannot verify whether the official dose is 500 mg.",
+        "I could not confirm whether the current code is A01.",
+        "I am unable to state the official monitoring schedule.",
+    ],
+)
+def test_no_evidence_guard_accepts_explicit_english_abstention_variants(limitation):
+    assert generation_module._contains_unsupported_authoritative_claim(limitation) is False
+
+
+def test_no_evidence_guard_rejects_positive_claim_after_english_abstention():
+    content = "I cannot verify the current label, but the official dose is 500 mg."
+
+    assert generation_module._contains_unsupported_authoritative_claim(content) is True
 
 
 @pytest.mark.parametrize(
