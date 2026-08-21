@@ -8,14 +8,18 @@ import json
 import os
 import statistics
 import subprocess
+import tempfile
 import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+
+try:
+    from absolute_http import post_json
+except ModuleNotFoundError:
+    from scripts.absolute_http import post_json
 
 MODEL_ID = "team-chatbot"
 MAX_LATENCY_SECONDS = 165.0
@@ -149,25 +153,21 @@ def validate_completion(payload: Any) -> tuple[str | None, bool]:
     return answer, answer == SAFETY_FALLBACK
 
 
-def _post_json(url: str, payload: dict[str, Any]) -> tuple[int, Any | None]:
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    request = Request(
-        url.rstrip("/") + "/v1/chat/completions",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+def _post_json(
+    url: Any,
+    payload: Any,
+    timeout_seconds: float = MAX_LATENCY_SECONDS,
+) -> tuple[int, Any | None]:
     try:
-        with urlopen(request, timeout=MAX_LATENCY_SECONDS) as response:  # noqa: S310 - explicit CLI URL.
-            status = response.status
-            try:
-                return status, json.loads(response.read().decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                return status, None
-    except HTTPError as error:
-        return error.code, None
+        endpoint = url.rstrip("/") + "/v1/chat/completions"
     except Exception:
         return 0, None
+    return post_json(
+        endpoint,
+        payload,
+        {"Content-Type": "application/json"},
+        timeout_seconds,
+    )
 
 
 def check_endpoint(url: str, messages: tuple[dict[str, str], ...]) -> EndpointResult:
@@ -207,18 +207,38 @@ def output_path_allowed(output: Path, repository_root: Path) -> bool:
     return checked.returncode == 0
 
 
-def write_jsonl(output: Path, records: list[dict[str, str | None]]) -> None:
-    output.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+def write_jsonl(output: Path, records: list[dict[str, str | None]]) -> bool:
+    """Atomically write UTF-8-safe paired answers or reject the whole artifact."""
+    descriptor = -1
+    temporary_path: Path | None = None
     try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".paired-", dir=output.parent)
+        temporary_path = Path(temporary_name)
         os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        with os.fdopen(descriptor, "wb") as stream:
             descriptor = -1
             for record in records:
-                stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+                stream.write(
+                    json.dumps(record, ensure_ascii=False, allow_nan=False).encode("utf-8") + b"\n"
+                )
+        os.replace(temporary_path, output)
+        temporary_path = None
+        os.chmod(output, 0o600)
+        return True
+    except Exception:
+        return False
     finally:
         if descriptor != -1:
-            os.close(descriptor)
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except OSError:
+                pass
 
 
 def run_check(
@@ -267,43 +287,48 @@ def _aggregate(results: list[EndpointResult]) -> dict[str, Any]:
     }
 
 
-def print_summary(summary: dict[str, Any]) -> None:
+def print_summary(summary: dict[str, Any]) -> bool:
     direct = summary["direct"]
     score = summary["score"]
-    print(
-        "paired_requests={requests} direct_success={direct_success} score_success={score_success} "
-        "direct_failure={direct_failure} score_failure={score_failure}".format(
-            requests=summary["requests"],
-            direct_success=direct["success"],
-            score_success=score["success"],
-            direct_failure=direct["failure"],
-            score_failure=score["failure"],
+    try:
+        print(
+            "paired_requests={requests} direct_success={direct_success} "
+            "score_success={score_success} "
+            "direct_failure={direct_failure} score_failure={score_failure}".format(
+                requests=summary["requests"],
+                direct_success=direct["success"],
+                score_success=score["success"],
+                direct_failure=direct["failure"],
+                score_failure=score["failure"],
+            )
         )
-    )
-    print(
-        "completion_rate=direct:{:.3f},score:{:.3f} fallback_rate=direct:{:.3f},score:{:.3f} "
-        "error_rate=direct:{:.3f},score:{:.3f}".format(
-            direct["completion_rate"],
-            score["completion_rate"],
-            direct["fallback_rate"],
-            score["fallback_rate"],
-            direct["error_rate"],
-            score["error_rate"],
+        print(
+            "completion_rate=direct:{:.3f},score:{:.3f} fallback_rate=direct:{:.3f},score:{:.3f} "
+            "error_rate=direct:{:.3f},score:{:.3f}".format(
+                direct["completion_rate"],
+                score["completion_rate"],
+                direct["fallback_rate"],
+                score["fallback_rate"],
+                direct["error_rate"],
+                score["error_rate"],
+            )
         )
-    )
-    print(
-        "latency_seconds=direct:min={:.3f},median={:.3f},max={:.3f} "
-        "score:min={:.3f},median={:.3f},max={:.3f}".format(
-            direct["latency_min"],
-            direct["latency_median"],
-            direct["latency_max"],
-            score["latency_min"],
-            score["latency_median"],
-            score["latency_max"],
+        print(
+            "latency_seconds=direct:min={:.3f},median={:.3f},max={:.3f} "
+            "score:min={:.3f},median={:.3f},max={:.3f}".format(
+                direct["latency_min"],
+                direct["latency_median"],
+                direct["latency_max"],
+                score["latency_min"],
+                score["latency_median"],
+                score["latency_max"],
+            )
         )
-    )
-    coverage = ",".join(f"{name}:{count}" for name, count in summary["coverage"].items())
-    print("domain_coverage=" + coverage)
+        coverage = ",".join(f"{name}:{count}" for name, count in summary["coverage"].items())
+        print("domain_coverage=" + coverage)
+        return True
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return False
 
 
 def _url(value: str) -> str:
@@ -328,22 +353,28 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
-    arguments = parse_args()
-    records, summary = run_check(arguments.direct_url, arguments.score_url)
     try:
-        write_jsonl(arguments.output, records)
-    except OSError:
-        print_summary(
-            {
-                "requests": 0,
-                "direct": _aggregate([]),
-                "score": _aggregate([]),
-                "coverage": {},
-            }
-        )
+        arguments = parse_args()
+        records, summary = run_check(arguments.direct_url, arguments.score_url)
+        wrote_output = write_jsonl(arguments.output, records)
+    except (Exception, KeyboardInterrupt):
+        wrote_output = False
+        summary = _empty_summary()
+    if not wrote_output:
+        print_summary(_empty_summary())
         return 1
-    print_summary(summary)
+    if not print_summary(summary):
+        return 1
     return int(summary["direct"]["failure"] != 0 or summary["score"]["failure"] != 0)
+
+
+def _empty_summary() -> dict[str, Any]:
+    return {
+        "requests": 0,
+        "direct": _aggregate([]),
+        "score": _aggregate([]),
+        "coverage": {},
+    }
 
 
 if __name__ == "__main__":

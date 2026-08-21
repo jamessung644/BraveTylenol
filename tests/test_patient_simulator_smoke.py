@@ -1,7 +1,10 @@
 import importlib.util
 import json
+import os
+import stat
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -36,6 +39,22 @@ def _server(handler):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
+
+
+class _DripHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_POST(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", "100000")
+        self.end_headers()
+        self.wfile.write(b"{")
+        self.wfile.flush()
+        time.sleep(2.0)
+
+    def log_message(self, format, *args):
+        return
 
 
 def _patient_handler(history_lengths: list[int], statuses: list[int]):
@@ -191,3 +210,104 @@ def test_conversation_records_harness_latency_limit_violations():
 
     assert result.harness_latencies == [165.1]
     assert result.harness_latency_failures == 1
+
+
+def test_post_json_has_an_absolute_deadline_and_sanitizes_lone_surrogates():
+    """A drip peer or invalid request text must produce only a failed aggregate result."""
+    simulator = _load_simulator_module()
+    server = _server(_DripHandler)
+    started = time.perf_counter()
+    try:
+        status, payload = simulator._post_json(
+            f"http://127.0.0.1:{server.server_port}",
+            {"model": "team-chatbot", "messages": []},
+            {},
+            timeout_seconds=0.2,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert (status, payload) == (0, None)
+    assert time.perf_counter() - started < 1.0
+    assert simulator._post_json("http://127.0.0.1:1", {"content": "\ud800"}, {}) == (0, None)
+
+
+def test_key_file_rejects_symlink_and_oversized_content(tmp_path):
+    """Following a symlink or accepting unbounded key material permits key-path attacks."""
+    simulator = _load_simulator_module()
+    target = tmp_path / "target"
+    target.write_text("test-key", encoding="utf-8")
+    target.chmod(0o600)
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    oversized = tmp_path / "oversized"
+    oversized.write_bytes(b"x" * 65_537)
+    oversized.chmod(0o600)
+
+    with pytest.raises(ValueError, match="credential file is not usable"):
+        simulator.read_api_key_file(link)
+    with pytest.raises(ValueError, match="credential file is not usable"):
+        simulator.read_api_key_file(oversized)
+
+
+def test_key_file_uses_one_descriptor_across_a_path_swap(monkeypatch, tmp_path):
+    """Reading the path after validation would accept attacker-replaced key material."""
+    simulator = _load_simulator_module()
+    key_file = tmp_path / "key"
+    replacement = tmp_path / "replacement"
+    key_file.write_text("original-key", encoding="utf-8")
+    replacement.write_text("replacement-key", encoding="utf-8")
+    key_file.chmod(0o600)
+    replacement.chmod(0o600)
+    original_stat = Path.stat
+
+    def swap_after_stat(path, *args, **kwargs):
+        result = original_stat(path, *args, **kwargs)
+        if path == key_file:
+            os.replace(replacement, key_file)
+        return result
+
+    monkeypatch.setattr(Path, "stat", swap_after_stat)
+
+    assert simulator.read_api_key_file(key_file) == "original-key"
+
+
+@pytest.mark.parametrize("attribute", ["wrong_owner", "nonregular"])
+def test_key_file_rejects_bad_fstat_metadata(monkeypatch, tmp_path, attribute):
+    """Descriptor metadata must reject wrong owners and non-regular files before reading."""
+    simulator = _load_simulator_module()
+    key_file = tmp_path / "key"
+    key_file.write_text("test-key", encoding="utf-8")
+    key_file.chmod(0o600)
+    uid = os.geteuid() + (1 if attribute == "wrong_owner" else 0)
+    mode = stat.S_IFREG | 0o600 if attribute == "wrong_owner" else stat.S_IFIFO | 0o600
+    metadata = type("Metadata", (), {"st_uid": uid, "st_mode": mode, "st_size": 8})()
+    monkeypatch.setattr(os, "fstat", lambda _: metadata)
+
+    with pytest.raises(ValueError, match="credential file is not usable"):
+        simulator.read_api_key_file(key_file)
+
+
+@pytest.mark.parametrize("failure", [UnicodeError, KeyboardInterrupt])
+def test_main_sanitizes_runtime_and_summary_failures(monkeypatch, capsys, tmp_path, failure):
+    """Unexpected local serialization/output faults must not print tracebacks or error details."""
+    simulator = _load_simulator_module()
+    arguments = type(
+        "Arguments",
+        (),
+        {
+            "harness_url": "http://harness.test",
+            "api_key_file": tmp_path / "key",
+            "conversations": 5,
+            "max_turns": 3,
+        },
+    )()
+    monkeypatch.setattr(simulator, "parse_args", lambda: arguments)
+    monkeypatch.setattr(simulator, "read_api_key_file", lambda _: "test-key")
+    monkeypatch.setattr(simulator, "run_smoke", lambda **_: (_ for _ in ()).throw(failure()))
+
+    assert simulator.main() == 1
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.startswith("conversations=0")
