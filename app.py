@@ -232,6 +232,7 @@ def create_app(
             ) from error
         credential_sources = _credential_sources(
             resolved_settings.api_key,
+            resolved_settings.embedded_api_key,
             authorization,
         )
         if not credential_sources:
@@ -284,6 +285,7 @@ def create_app(
         normalized_messages = _validate_external_request(request)
         credential_sources = _credential_sources(
             resolved_settings.api_key,
+            resolved_settings.embedded_api_key,
             authorization,
         )
         if not credential_sources:
@@ -467,6 +469,7 @@ def _normalized_lunit_key(value: str | None) -> str | None:
 
 def _credential_sources(
     environment_key: str | None,
+    embedded_main_key: str | None,
     authorization: str | None,
 ) -> list[tuple[str, str]]:
     """Return distinct, format-valid credentials in documented precedence order."""
@@ -474,6 +477,7 @@ def _credential_sources(
     candidates: list[tuple[str, str]] = []
     for source, candidate in (
         ("environment", _normalized_lunit_key(environment_key)),
+        ("embedded_main", _normalized_lunit_key(embedded_main_key)),
         ("request_bearer", _normalized_lunit_key(_bearer_token(authorization))),
     ):
         if candidate is not None and all(candidate != value for _, value in candidates):

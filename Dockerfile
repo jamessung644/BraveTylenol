@@ -2,7 +2,8 @@ FROM python:3.13.15-slim-trixie
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    OTEL_SDK_DISABLED=true
+    OTEL_SDK_DISABLED=true \
+    SUBMISSION_CREDENTIAL_SOURCE=main
 
 WORKDIR /app
 
@@ -10,6 +11,7 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir --disable-pip-version-check -r /app/requirements.txt
 
 COPY app.py /app/app.py
+COPY main.py /app/main.py
 COPY lunit_hackathon /app/lunit_hackathon
 
 USER 65532:65532

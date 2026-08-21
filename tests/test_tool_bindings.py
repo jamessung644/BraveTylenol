@@ -126,6 +126,79 @@ def test_strict_wrapper_rejects_omitted_wrapper_fields_and_extra_arguments():
     assert extra.value.code == "model_arguments_invalid"
 
 
+def test_optional_open_object_is_omitted_from_strict_model_schema():
+    raw_schema = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "minLength": 1},
+            "collection_name": {"type": "string", "minLength": 1},
+            "filters": {
+                "anyOf": [
+                    {"type": "object", "additionalProperties": True},
+                    {"type": "null"},
+                ]
+            },
+            "limit": {"type": "integer", "minimum": 1},
+        },
+        "required": ["query", "collection_name"],
+        "additionalProperties": False,
+    }
+
+    binding = compile_tool_binding(tool("rag_vector_query", schema=raw_schema))
+    strict = binding.strict_input_schema
+
+    assert set(strict["properties"]) == {"collection_name", "limit", "query"}
+    assert strict["required"] == ["collection_name", "limit", "query"]
+    assert strict["additionalProperties"] is False
+    assert binding.project_arguments(
+        {"query": "warfarin pregnancy", "collection_name": "guidelines", "limit": None}
+    ) == {"query": "warfarin pregnancy", "collection_name": "guidelines"}
+
+    with pytest.raises(ToolBindingError) as caught:
+        binding.project_arguments(
+            {
+                "query": "warfarin pregnancy",
+                "collection_name": "guidelines",
+                "limit": None,
+                "filters": {"arbitrary": "model-controlled"},
+            }
+        )
+    assert caught.value.code == "model_arguments_invalid"
+
+    manifest = binding.manifest_entry()
+    assert manifest["argument_projection_version"] == PROJECTION_VERSION
+    assert manifest["strict_wrapper_schema_sha256"] == schema_sha256(strict)
+    assert manifest["raw_schema_sha256"] == schema_sha256(raw_schema)
+
+
+def test_required_open_object_still_fails_strict_projection():
+    with pytest.raises(ToolBindingError) as caught:
+        compile_tool_binding(
+            tool(
+                "required_open",
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "filters": {
+                            "anyOf": [
+                                {
+                                    "type": "object",
+                                    "additionalProperties": True,
+                                },
+                                {"type": "null"},
+                            ]
+                        },
+                    },
+                    "required": ["query", "filters"],
+                    "additionalProperties": False,
+                },
+            )
+        )
+
+    assert caught.value.code == "strict_projection_not_lossless"
+
+
 def test_projection_resolves_local_refs_and_revalidates_raw_schema():
     binding = compile_tool_binding(
         tool(

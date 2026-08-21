@@ -1040,7 +1040,7 @@ async def test_retrieval_keeps_safe_survivors_when_selected_chain_is_partial(mon
         input_schema={
             "type": "object",
             "properties": {"filters": {"type": "object", "additionalProperties": True}},
-            "required": [],
+            "required": ["filters"],
         },
     )
     l2 = ScriptedL2([finalization(status="no_evidence", items=[])])

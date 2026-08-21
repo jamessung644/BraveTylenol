@@ -16,6 +16,7 @@ REQUIRED_TRACKED_RELEASE_PATHS = {
     ".dockerignore",
     "Dockerfile",
     "app.py",
+    "main.py",
     "requirements.txt",
     "lunit_hackathon/__init__.py",
     "lunit_hackathon/artifacts.py",
@@ -30,6 +31,7 @@ REQUIRED_TRACKED_RELEASE_PATHS = {
     "lunit_hackathon/prompts.py",
     "lunit_hackathon/retrieval.py",
     "lunit_hackathon/schemas.py",
+    "lunit_hackathon/submission_credential.py",
     "lunit_hackathon/tool_bindings.py",
     "lunit_hackathon/runtime_artifacts/runtime_bundle_v1.json",
     "lunit_hackathon/runtime_artifacts/runtime_bundle_v1.sha256",
@@ -65,7 +67,8 @@ def test_docker_runs_the_orchestrator_not_the_legacy_direct_proxy():
     assert "COPY app.py" in dockerfile
     assert "COPY lunit_hackathon" in dockerfile
     assert '"uvicorn", "app:app"' in dockerfile
-    assert "COPY main.py" not in dockerfile
+    assert "COPY main.py /app/main.py" in dockerfile
+    assert "SUBMISSION_CREDENTIAL_SOURCE=main" in dockerfile
     assert "COPY . " not in dockerfile
     assert "OTEL_SDK_DISABLED=true" in dockerfile
     assert "ProxyHandler({})" in dockerfile
@@ -82,11 +85,11 @@ def test_docker_context_contains_runtime_and_excludes_secrets():
     assert "**" in ignore_rules
     assert "!requirements.txt" in ignore_rules
     assert "!app.py" in ignore_rules
+    assert "!main.py" in ignore_rules
     assert "!lunit_hackathon/" in ignore_rules
     assert "!lunit_hackathon/**" in ignore_rules
     assert "lunit_hackathon/**/__pycache__/" in ignore_rules
     assert "lunit_hackathon/**/*.py[co]" in ignore_rules
-    assert "!main.py" not in ignore_rules
     assert "!.env" not in ignore_rules
 
 
@@ -124,7 +127,14 @@ def test_packaged_runtime_has_no_untracked_dependency():
     untracked_runtime = {
         path
         for path in untracked
-        if path in {"app.py", "Dockerfile", ".dockerignore", "requirements.txt"}
+        if path
+        in {
+            "app.py",
+            "main.py",
+            "Dockerfile",
+            ".dockerignore",
+            "requirements.txt",
+        }
         or path.startswith("lunit_hackathon/")
     }
 

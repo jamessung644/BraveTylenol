@@ -1,6 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
+import lunit_hackathon.submission_credential as submission_credential
 from lunit_hackathon.config import Settings
 
 
@@ -38,6 +39,45 @@ def test_example_placeholders_are_not_treated_as_credentials(tmp_path, monkeypat
     dotenv.write_text("LUNIT_FM_API_KEY=여기에_직접_입력\n", encoding="utf-8")
 
     assert Settings(_env_file=dotenv).api_key is None
+
+
+def test_embedded_main_credential_is_explicitly_gated(monkeypatch):
+    calls = []
+
+    def fake_import(name):
+        calls.append(name)
+        return type("FakeMain", (), {"EMBEDDED_LUNIT_API_KEY": "lunit_test_embedded"})
+
+    monkeypatch.delenv("LUNIT_FM_API_KEY", raising=False)
+    monkeypatch.delenv("SUBMISSION_CREDENTIAL_SOURCE", raising=False)
+    monkeypatch.setattr(submission_credential, "import_module", fake_import)
+
+    ordinary = Settings(_env_file=None)
+    packaged = Settings(
+        _env_file=None,
+        SUBMISSION_CREDENTIAL_SOURCE="main",
+    )
+
+    assert ordinary.embedded_api_key is None
+    assert calls == []
+    assert packaged.embedded_api_key == "lunit_test_embedded"
+    assert calls == ["main"]
+    assert "lunit_test_embedded" not in repr(packaged)
+
+
+def test_non_string_embedded_main_credential_is_unavailable(monkeypatch):
+    monkeypatch.delenv("LUNIT_FM_API_KEY", raising=False)
+    monkeypatch.setattr(
+        submission_credential,
+        "import_module",
+        lambda name: type("FakeMain", (), {"EMBEDDED_LUNIT_API_KEY": object()}),
+    )
+    settings = Settings(
+        _env_file=None,
+        SUBMISSION_CREDENTIAL_SOURCE="main",
+    )
+
+    assert settings.embedded_api_key is None
 
 
 def test_latency_controls_have_safe_defaults(monkeypatch):

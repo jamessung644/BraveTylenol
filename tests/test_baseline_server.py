@@ -168,7 +168,7 @@ class BoundedL2FallbackTest(unittest.TestCase):
         self.assertEqual(result["choices"][0]["message"]["content"], "L2 답변")
         self.assertEqual(
             opener.requests[0].get_header("Authorization"),
-            "Bearer ffffffff",
+            f"Bearer {main.EMBEDDED_LUNIT_API_KEY}",
         )
 
     def test_malformed_environment_keys_use_embedded_placeholder(self):
@@ -192,7 +192,7 @@ class BoundedL2FallbackTest(unittest.TestCase):
                 self.assertEqual(result["choices"][0]["message"]["content"], "L2 답변")
                 self.assertEqual(
                     opener.requests[0].get_header("Authorization"),
-                    "Bearer ffffffff",
+                    f"Bearer {main.EMBEDDED_LUNIT_API_KEY}",
                 )
 
     def test_extended_coeval_shape_preserves_messages_and_smaller_token_budget(self):

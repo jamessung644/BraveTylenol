@@ -19,7 +19,7 @@ from jsonschema import SchemaError, validators
 
 from lunit_hackathon.schemas import MCPTool
 
-PROJECTION_VERSION = "strict-null-optionals-v1"
+PROJECTION_VERSION = "strict-omit-open-optionals-v2"
 
 _CODEX_EXPOSED_PREFIX = "mcp__"
 _LOCAL_TOOL_NAMES = frozenset(
@@ -513,11 +513,27 @@ def _compile_schema(
                     f"Property schema at {path}/properties/{name} is invalid",
                     code="strict_projection_unsupported",
                 )
-            strict_property = _compile_schema(
-                property_schema,
-                root_schema,
-                path=f"{path}/properties/{name}",
-            )
+            try:
+                strict_property = _compile_schema(
+                    property_schema,
+                    root_schema,
+                    path=f"{path}/properties/{name}",
+                )
+            except ToolBindingError as error:
+                # A raw optional property may be safely absent at the transport
+                # boundary. When its schema contains an open object that cannot
+                # be represented by an L2 strict function schema, omit the
+                # entire property from the model plane. The closed wrapper then
+                # prevents the model from sending it, while the projected object
+                # is still validated against the authoritative raw schema.
+                # Required properties must never be dropped.
+                if (
+                    name not in required
+                    and error.code == "strict_projection_not_lossless"
+                    and _contains_open_object(property_schema, root_schema)
+                ):
+                    continue
+                raise
             resolved_property = _resolve_schema(property_schema, root_schema)
             accepts_null = _schema_accepts_null(property_schema, root_schema)
             if name not in required:
@@ -532,7 +548,7 @@ def _compile_schema(
             strict_properties[name] = strict_property
         compiled["type"] = "object"
         compiled["properties"] = strict_properties
-        compiled["required"] = sorted(properties)
+        compiled["required"] = sorted(strict_properties)
         compiled["additionalProperties"] = False
     elif root:
         raise ToolBindingError(
@@ -674,6 +690,70 @@ def _schema_accepts_null(schema: dict[str, Any], root_schema: dict[str, Any]) ->
     ):
         return True
     return False
+
+
+def _contains_open_object(
+    schema: dict[str, Any],
+    root_schema: dict[str, Any],
+    *,
+    seen_refs: frozenset[str] = frozenset(),
+) -> bool:
+    """Return whether a property contains an unclosable open-object branch."""
+
+    reference = schema.get("$ref")
+    if isinstance(reference, str):
+        if reference in seen_refs:
+            return False
+        resolved = _resolve_schema(schema, root_schema)
+        return _contains_open_object(
+            resolved,
+            root_schema,
+            seen_refs=seen_refs | {reference},
+        )
+
+    additional = schema.get("additionalProperties")
+    if _is_object_schema(schema) and (
+        additional is True or isinstance(additional, dict)
+    ):
+        return True
+
+    for key in ("anyOf", "oneOf"):
+        branches = schema.get(key)
+        if isinstance(branches, list) and any(
+            isinstance(branch, dict)
+            and _contains_open_object(branch, root_schema, seen_refs=seen_refs)
+            for branch in branches
+        ):
+            return True
+
+    properties = schema.get("properties")
+    if isinstance(properties, dict) and any(
+        isinstance(property_schema, dict)
+        and _contains_open_object(property_schema, root_schema, seen_refs=seen_refs)
+        for property_schema in properties.values()
+    ):
+        return True
+
+    items = schema.get("items")
+    if isinstance(items, dict) and _contains_open_object(
+        items,
+        root_schema,
+        seen_refs=seen_refs,
+    ):
+        return True
+    if isinstance(items, list) and any(
+        isinstance(item, dict)
+        and _contains_open_object(item, root_schema, seen_refs=seen_refs)
+        for item in items
+    ):
+        return True
+
+    prefix_items = schema.get("prefixItems")
+    return isinstance(prefix_items, list) and any(
+        isinstance(item, dict)
+        and _contains_open_object(item, root_schema, seen_refs=seen_refs)
+        for item in prefix_items
+    )
 
 
 def _is_object_schema(schema: dict[str, Any]) -> bool:

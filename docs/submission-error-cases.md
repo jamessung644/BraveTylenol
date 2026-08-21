@@ -4,8 +4,9 @@ Use this checklist before promoting a submission commit.
 
 ## Entrypoint and packaged-file mismatch
 
-- Confirm that the Docker `CMD` executes the file being changed. An edit to
-  `main.py` is ignored when the image starts `app.py`, and vice versa.
+- Confirm that the Docker `CMD` executes the file being changed. When the image
+  starts `app.py`, `main.py` cannot change routing, prompts, or medical output;
+  the only explicit exception in this submission is its credential bridge.
 - Confirm that `.dockerignore` admits every file copied by the Dockerfile and
   excludes credentials, local environment files, caches, tests, and unrelated
   sources.
@@ -24,6 +25,28 @@ Use this checklist before promoting a submission commit.
   a valid runtime commit can silently change `hybrid` back to `direct`.
 - Diagnose early failures in order: deployed SHA, image build/startup,
   readiness/credential delivery, request contract, then routing or MCP.
+- If the submission credential is supplied through `main.py`, the modular
+  image must copy that file and explicitly enable the credential bridge while
+  continuing to start `uvicorn app:app`. Merely editing `main.py` does not make
+  the key visible to the modular runtime.
+- Credential precedence is environment, packaged `main.py`, then a valid
+  request Bearer. Only 401/403 may advance to the next distinct credential;
+  timeout, 429, and 5xx must not multiply calls across credentials.
+
+## Live MCP schema drift
+
+- HTTP success from MCP discovery does not prove that every discovered schema
+  is usable as a strict L2 function. Compile every approved binding against the
+  live schema before claiming MCP readiness.
+- On 2026-08-22, `rag_vector_query.filters` was an optional arbitrary-object
+  field. Closing that object was not lossless and caused
+  `strict_projection_not_lossless`, even though discovery returned all 21
+  tools. A safe wrapper may omit an unprojectable *optional* capability and
+  revalidate projected arguments against the raw transport schema; it must
+  never omit a required field or expose an open object to L2.
+- Re-run the exact live binding canary after any projection change. Record only
+  aggregate tool counts, hashes, status, and bounded result length—not medical
+  evidence or credential values.
 
 ## Test-environment mismatches
 
@@ -40,6 +63,11 @@ Use this checklist before promoting a submission commit.
 - If two branches must ship the same files, prefer a normal fast-forward commit
   whose tree matches the validated candidate. Preserve the prior remote history
   instead of force-pushing it away.
+- Every agent-created remote commit must keep
+  `main.py:EMBEDDED_LUNIT_API_KEY` equal to the literal placeholder
+  `"fffffff"`. The user inserts the short-lived organizer key manually after
+  the push. Never push a locally tested live key, even when the key is scheduled
+  for same-day disposal.
 
 ## Release checklist
 
@@ -49,5 +77,6 @@ Use this checklist before promoting a submission commit.
    `/v1/models`.
 4. Run a nonempty chat-completion smoke through the same HTTP contract used by
    the evaluator.
-5. Keep credentials out of Git, Docker layers, logs, responses, and test
-   artifacts.
+5. The committed `main.py` contains only `"fffffff"`; the user replaces it in
+   the submission branch. Never duplicate a live value into generated
+   artifacts, environment metadata, logs, responses, or test fixtures.

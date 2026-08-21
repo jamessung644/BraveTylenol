@@ -1,11 +1,13 @@
 import json
 import logging
 import time
+from types import SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 import app as app_module
+import lunit_hackathon.submission_credential as submission_credential
 from app import create_app
 from lunit_hackathon.artifacts import RuntimeArtifactError
 from lunit_hackathon.config import Settings
@@ -17,6 +19,7 @@ from lunit_hackathon.errors import (
 from lunit_hackathon.schemas import L2Completion, TokenUsage
 
 ENV_KEY = "lunit_test_environment"
+EMBEDDED_KEY = "lunit_test_embedded"
 REQUEST_KEY = "lunit_test_request"
 
 
@@ -46,6 +49,21 @@ def passthrough_settings(monkeypatch, environment_key=ENV_KEY):
     else:
         monkeypatch.setenv("LUNIT_FM_API_KEY", environment_key)
     return Settings(_env_file=None).model_copy(update={"agent_mode": "passthrough"})
+
+
+def embedded_passthrough_settings(monkeypatch, embedded_key=EMBEDDED_KEY):
+    monkeypatch.delenv("LUNIT_FM_API_KEY", raising=False)
+    monkeypatch.setattr(
+        submission_credential,
+        "import_module",
+        lambda name: SimpleNamespace(EMBEDDED_LUNIT_API_KEY=embedded_key),
+    )
+    return Settings(_env_file=None).model_copy(
+        update={
+            "agent_mode": "passthrough",
+            "submission_credential_source": "main",
+        }
+    )
 
 
 async def test_health_and_models_work_without_key(monkeypatch):
@@ -97,6 +115,19 @@ async def test_readyz_accepts_valid_environment_or_request_credential(monkeypatc
     assert request_ready.json()["credential"] == "request_bearer"
     assert ENV_KEY not in environment_ready.text
     assert REQUEST_KEY not in request_ready.text
+
+
+async def test_readyz_accepts_packaged_main_credential_without_exposing_it(monkeypatch):
+    application = create_app(embedded_passthrough_settings(monkeypatch))
+    async with AsyncClient(
+        transport=ASGITransport(app=application),
+        base_url="http://test",
+    ) as client:
+        ready = await client.get("/readyz")
+
+    assert ready.status_code == 200
+    assert ready.json()["credential"] == "embedded_main"
+    assert EMBEDDED_KEY not in ready.text
 
 
 async def test_startup_validates_artifacts_without_external_preflight(monkeypatch):
@@ -467,6 +498,165 @@ async def test_chat_prefers_valid_environment_key_over_distinct_request_bearer(m
 
     assert response.status_code == 200
     assert RecordingL2.received_api_key == ENV_KEY
+
+
+@pytest.mark.parametrize("auth_status", [401, 403])
+async def test_chat_fails_over_environment_then_embedded_then_request(
+    monkeypatch,
+    caplog,
+    auth_status,
+):
+    calls = []
+
+    class CredentialOrderL2:
+        def __init__(self, settings, *, http_client=None, semaphore=None):
+            del http_client, semaphore
+            self.api_key = settings.api_key
+            self.last_usage = TokenUsage()
+
+        async def complete(self, **kwargs):
+            del kwargs
+            calls.append(self.api_key)
+            if self.api_key in {ENV_KEY, EMBEDDED_KEY}:
+                raise UpstreamResponseError(
+                    f"L2 returned HTTP {auth_status} (auth_error)"
+                )
+            return L2Completion(content="보조 요청 키 답변")
+
+    monkeypatch.setenv("LUNIT_FM_API_KEY", ENV_KEY)
+    monkeypatch.setattr(
+        submission_credential,
+        "import_module",
+        lambda name: SimpleNamespace(EMBEDDED_LUNIT_API_KEY=EMBEDDED_KEY),
+    )
+    monkeypatch.setattr("app.L2Client", CredentialOrderL2)
+    caplog.set_level(logging.WARNING)
+    settings = Settings(_env_file=None).model_copy(
+        update={
+            "agent_mode": "passthrough",
+            "submission_credential_source": "main",
+        }
+    )
+    application = create_app(settings)
+    async with AsyncClient(
+        transport=ASGITransport(app=application),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {REQUEST_KEY}"},
+            json={"messages": [{"role": "user", "content": "질문"}]},
+        )
+
+    assert response.status_code == 200
+    assert calls == [ENV_KEY, EMBEDDED_KEY, REQUEST_KEY]
+    assert ENV_KEY not in response.text
+    assert EMBEDDED_KEY not in response.text
+    assert REQUEST_KEY not in response.text
+    assert ENV_KEY not in caplog.text
+    assert EMBEDDED_KEY not in caplog.text
+    assert REQUEST_KEY not in caplog.text
+
+
+async def test_chat_uses_embedded_main_before_request_bearer(monkeypatch):
+    class RecordingL2:
+        received_api_key = None
+
+        def __init__(self, settings, *, http_client=None, semaphore=None):
+            del http_client, semaphore
+            type(self).received_api_key = settings.api_key
+            self.last_usage = TokenUsage()
+
+        async def complete(self, **kwargs):
+            del kwargs
+            return L2Completion(content="내장 키 답변")
+
+    monkeypatch.setattr("app.L2Client", RecordingL2)
+    application = create_app(embedded_passthrough_settings(monkeypatch))
+    async with AsyncClient(
+        transport=ASGITransport(app=application),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {REQUEST_KEY}"},
+            json={"messages": [{"role": "user", "content": "질문"}]},
+        )
+
+    assert response.status_code == 200
+    assert RecordingL2.received_api_key == EMBEDDED_KEY
+
+
+async def test_invalid_environment_does_not_hide_valid_embedded_main(monkeypatch):
+    class RecordingL2:
+        received_api_key = None
+
+        def __init__(self, settings, *, http_client=None, semaphore=None):
+            del http_client, semaphore
+            type(self).received_api_key = settings.api_key
+            self.last_usage = TokenUsage()
+
+        async def complete(self, **kwargs):
+            del kwargs
+            return L2Completion(content="내장 키 답변")
+
+    monkeypatch.setenv("LUNIT_FM_API_KEY", "invalid-environment-value")
+    monkeypatch.setattr(
+        submission_credential,
+        "import_module",
+        lambda name: SimpleNamespace(EMBEDDED_LUNIT_API_KEY=EMBEDDED_KEY),
+    )
+    monkeypatch.setattr("app.L2Client", RecordingL2)
+    settings = Settings(_env_file=None).model_copy(
+        update={
+            "agent_mode": "passthrough",
+            "submission_credential_source": "main",
+        }
+    )
+    application = create_app(settings)
+    async with AsyncClient(
+        transport=ASGITransport(app=application),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {REQUEST_KEY}"},
+            json={"messages": [{"role": "user", "content": "질문"}]},
+        )
+
+    assert response.status_code == 200
+    assert RecordingL2.received_api_key == EMBEDDED_KEY
+
+
+async def test_invalid_embedded_main_credential_falls_back_to_request_bearer(monkeypatch):
+    class RecordingL2:
+        received_api_key = None
+
+        def __init__(self, settings, *, http_client=None, semaphore=None):
+            del http_client, semaphore
+            type(self).received_api_key = settings.api_key
+            self.last_usage = TokenUsage()
+
+        async def complete(self, **kwargs):
+            del kwargs
+            return L2Completion(content="요청 키 답변")
+
+    monkeypatch.setattr("app.L2Client", RecordingL2)
+    application = create_app(
+        embedded_passthrough_settings(monkeypatch, "not-a-lunit-key")
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=application),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {REQUEST_KEY}"},
+            json={"messages": [{"role": "user", "content": "질문"}]},
+        )
+
+    assert response.status_code == 200
+    assert RecordingL2.received_api_key == REQUEST_KEY
 
 
 async def test_chat_ignores_invalid_bearer_when_environment_key_is_valid(monkeypatch):

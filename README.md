@@ -3,9 +3,10 @@
 `baseline/024-hybrid`의 동시성·지연시간 대조군을 바탕으로, 환경 설정이 없는 제출
 Docker에서는 고정밀 hybrid routing을 사용한다. 일반 질문은 Lunit L2 direct fast path로
 답하고, 근거 의존성이 명확한 질문만 공식 MCP Retrieval로 보낸다. 실제 Docker image는
-`main.py`가 아니라 FastAPI `app.py`를 `uvicorn`으로
-실행한다. `main.py`는 이전 direct-only 대조군을 재현하기 위한 저장소 파일이며 image에
-포함되지 않는다.
+FastAPI `app.py`를 `uvicorn`으로 실행한다. `main.py`는 entrypoint가 아니지만, 주최 측이
+허용한 임시 제출 credential을 읽는 호환성 파일로 image에 함께 들어간다. 의료 답변과
+AGENT_MODE 동작은 모두 modular app이 담당한다. 저장소에는 `"fffffff"` placeholder만
+커밋하며 실제 제출 key는 사용자가 push 이후 직접 교체한다.
 
 핵심 목표는 두 가지다.
 
@@ -24,9 +25,10 @@ Docker image는 다음 인터페이스를 제공한다.
 - `GET /health`, `GET /healthz`, `GET /readyz`
 - `GET /v1/models`
 - `POST /v1/chat/completions`
-- 형식이 유효한 환경 `LUNIT_FM_API_KEY`가 요청 Bearer보다 우선
-- 환경 credential이 없거나 L2가 401/403을 반환한 경우에만 형식이 유효한 요청 Bearer를
-  한 번의 보조 후보로 사용하며, 같은 request의 Model과 MCP에 같은 후보를 전달
+- credential 우선순위는 형식이 유효한 환경 `LUNIT_FM_API_KEY`, image의 `main.py` 내장값,
+  형식이 유효한 요청 Bearer 순서
+- L2가 401/403을 반환한 경우에만 다음의 서로 다른 credential 후보를 한 번씩 사용하며,
+  같은 request의 Model과 MCP에 같은 후보를 전달
 - 환경 credential이 없는 evaluator bearer-only 실행도 `/readyz`에 형식상 유효한
   `Authorization: Bearer ...`를 공급하면 static readiness 200
 - 유효한 credential이 없으면 process liveness는 유지하지만 `/readyz`와 chat은 503
@@ -35,8 +37,8 @@ Docker image는 다음 인터페이스를 제공한다.
 - 모든 응답의 `X-Request-ID`
 
 요청 body 크기·JSON 깊이·중복 key·비유한 수·지원하지 않는 model/stream을 경계에서
-검증한다. Docker context는 `app.py`, `lunit_hackathon/`, `requirements.txt`만 image에
-복사하며 테스트·문서·canonical 원문·`main.py`는 실행 image에서 제외한다.
+검증한다. Docker context는 `app.py`, `main.py`, `lunit_hackathon/`, `requirements.txt`만
+image에 복사하며 테스트·문서·canonical 원문은 실행 image에서 제외한다.
 
 CoEval 확장 입력을 위해 대화 선두의 `system`/`developer` context, `text`·`input_text`
 content part, `max_completion_tokens`와 무해한 metadata/sampling field를 수용한다. 호출자가
@@ -177,7 +179,7 @@ python -m uvicorn app:app --host 0.0.0.0 --port 8000 --no-access-log
 
 ~~~bash
 docker build -t brave-tylenol-hybrid .
-docker run --rm -p 8000:8000 -e LUNIT_FM_API_KEY brave-tylenol-hybrid
+docker run --rm -p 8000:8000 brave-tylenol-hybrid
 ~~~
 
 ~~~bash
@@ -186,10 +188,10 @@ python scripts/compile_runtime_artifacts.py --check
 ~~~
 
 `GET /health`는 process liveness만 확인한다. `GET /readyz`는 local artifact·공식 endpoint 설정과
-형식상 유효한 환경 또는 request Bearer credential 존재를 확인하지만 외부 L2/MCP를 미리 호출하지
-않는다. 따라서 환경 key가 없는 evaluator bearer-only 실행도 유효한 Bearer header를 함께 보내면
-readiness 200이고, 어느 credential도 없는 격리 실행은 기동·liveness만 성공하며 readiness/chat은
-503이어야 한다.
+형식상 유효한 환경, packaged `main.py`, 또는 request Bearer credential 존재를 확인하지만 외부
+L2/MCP를 미리 호출하지 않는다. 따라서 packaged credential이 유효하면 header 없이도 readiness
+200이며, 그것이 없더라도 evaluator bearer-only 실행은 유효한 Bearer header를 함께 보내면
+readiness 200이다. 어느 credential도 없으면 기동·liveness만 성공하고 readiness/chat은 503이다.
 실제 Lunit network에서 제출 전 live canary를 별도로 실행해야 한다.
 
 ## 벤치마크 해석

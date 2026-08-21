@@ -23,15 +23,17 @@
 
 ## 실제 image와 entrypoint
 
-Docker는 `app.py`와 `lunit_hackathon/`만 복사하고 다음 command로 FastAPI를 실행한다.
+Docker는 `app.py`, `main.py`, `lunit_hackathon/`을 복사하고 다음 command로 FastAPI를 실행한다.
 
 ~~~text
 uvicorn app:app --host 0.0.0.0 --port 8000 --no-access-log
 ~~~
 
-저장소의 `main.py`와 `tests/`, `docs/`, `canonical_sources/`, `runtime_sources/`는 image에
-포함되지 않는다. `main.py`는 direct-only baseline 대조군이며 제출 runtime의 entrypoint나
-fallback provider가 아니다. Runtime prompt와 binding manifest는 build 전에 compile되어
+`main.py`는 direct-only baseline의 실행 코드이지만 제출 image에서는 entrypoint나 의료
+fallback provider로 사용하지 않고, 주최 측이 허용한 임시 embedded credential만 modular
+Settings에 제공한다. `tests/`, `docs/`, `canonical_sources/`, `runtime_sources/`는 image에
+포함되지 않는다. Git에는 `"fffffff"`만 두고 실제 값은 사용자가 제출 branch에서 직접
+교체한다. Runtime prompt와 binding manifest는 build 전에 compile되어
 `lunit_hackathon/runtime_artifacts/` 안의 검증된 artifact로 image에 들어간다.
 
 ## 요청 흐름
@@ -219,8 +221,8 @@ RAG가 시작된 뒤 Retrieval 실패 시 일반 direct prompt로 몰래 전환�
 | 파일 | 책임 |
 | --- | --- |
 | `app.py` | FastAPI lifespan, OpenAI-compatible API, 전체 deadline과 semaphore |
-| `main.py` | image 밖의 legacy direct-only 대조군 |
-| `config.py` | .env/환경 변수 검증과 비밀값 마스킹 |
+| `main.py` | legacy direct 대조군 코드와 제출용 embedded credential source; entrypoint 아님 |
+| `config.py` | .env/환경/main credential 설정과 비밀값 마스킹 |
 | `artifacts.py` | compiled prompt·model/MCP manifest load와 hash 검증 |
 | `l2_client.py` | async L2 Chat Completions, attempt deadline, 응답 검증 |
 | `generation.py` | hybrid source routing, direct/RAG/emergency L2 trajectory, citation 검증 |
@@ -235,7 +237,7 @@ RAG가 시작된 뒤 Retrieval 실패 시 일반 direct prompt로 몰래 전환�
 
 | 상황 | 동작 |
 | --- | --- |
-| 유효한 환경·request Bearer credential 모두 없음 | health는 200, readiness/chat은 503 |
+| 유효한 환경·embedded main·request Bearer credential 모두 없음 | health는 200, readiness/chat은 503 |
 | 환경 key 없는 evaluator가 유효한 Bearer로 `/readyz` 호출 | static readiness 200; 외부 dependency는 preflight하지 않음 |
 | L2 타임아웃 | 504 |
 | L2 전송/응답/형식 오류 | 세부정보를 숨긴 502 |
@@ -270,14 +272,16 @@ endpoint 두 종류뿐이다. 일반 웹 검색, 상용 검색 API, cloud vector
 의존하지 않는다. MCP가 느리거나 실패해도 final L2 reserve를 사용하지만, hybrid/rag manifest가
 요구한 endpoint나 registry가 잘못된 경우 조용히 다른 remote source로 우회하지 않는다.
 
-Image에는 `.env`, test, docs, cache, canonical Markdown를 복사하지 않는다. `GET /readyz`는
+Image에는 `.env`, test, docs, cache, canonical Markdown를 복사하지 않는다. 제출 호환성을 위해
+`main.py`만 credential source로 포함한다. `GET /readyz`는
 static manifest 상태와 “live canary required”를 보여 줄 뿐 외부 dependency를 preflight하지
 않는다. 제출 직전 Lunit network에서 model, MCP discovery/schema, 실제 one-call Retrieval과
 final answer를 포함한 live canary가 필요하다.
 
 ## 보안과 개인정보
 
-- API Key와 대시보드 자격 증명은 .env 또는 런타임 환경에만 둔다.
+- 일반 배포의 API Key와 대시보드 자격 증명은 .env 또는 런타임 환경에 둔다. 이번
+  organizer-approved 임시 제출에서는 사용자가 관리하는 `main.py` embedded key도 허용한다.
 - .env와 모든 변형은 Git 및 Docker context에서 제외하고 .env.example만 허용한다.
 - SecretStr로 설정 객체 표현에서 비밀을 마스킹한다.
 - 요청 로그에는 생성된 request ID, 메서드, 경로, 상태, 시간, 오류 클래스만 기록한다.

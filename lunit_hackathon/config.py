@@ -3,6 +3,8 @@ from typing import Any, Literal
 from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from lunit_hackathon.submission_credential import embedded_main_api_key
+
 _PLACEHOLDERS = {"", "여기에_직접_입력", "lunit_replace_me"}
 
 
@@ -23,6 +25,10 @@ class Settings(BaseSettings):
     lunit_fm_api_key: SecretStr | None = Field(
         default=None,
         validation_alias="LUNIT_FM_API_KEY",
+    )
+    submission_credential_source: Literal["none", "main"] = Field(
+        default="none",
+        validation_alias="SUBMISSION_CREDENTIAL_SOURCE",
     )
     lunit_fm_model: str = Field(
         default="Lunit/L2-preview",
@@ -132,6 +138,10 @@ class Settings(BaseSettings):
     @property
     def api_key(self) -> str | None:
         return self.lunit_fm_api_key.get_secret_value() if self.lunit_fm_api_key else None
+
+    @property
+    def embedded_api_key(self) -> str | None:
+        return embedded_main_api_key(self.submission_credential_source == "main")
 
     @property
     def chat_completions_url(self) -> str:

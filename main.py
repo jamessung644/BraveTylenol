@@ -27,7 +27,7 @@ L2_MAX_TOKENS = 4_096
 MAX_API_KEY_LENGTH = 4_096
 MAX_CONCURRENT_L2_REQUESTS = 16
 MAX_UPSTREAM_RESPONSE_BYTES = 4_000_000
-EMBEDDED_LUNIT_API_KEY = "lunit_wXzHIQ-cqbcNdzMok9IUdohSL9HmqfHyuuJMQOFTbrA"
+EMBEDDED_LUNIT_API_KEY = "fffffff"
 KOREAN_BASELINE_RESPONSE = (
     "질문을 확인했습니다. 증상이 심하거나 갑자기 악화되면 즉시 119 또는 "
     "응급실의 도움을 받고, 정확한 판단을 위해 의료 전문가와 상담해 주세요."
