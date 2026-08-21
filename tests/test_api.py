@@ -33,6 +33,7 @@ def settings(api_key: str = "test-key") -> Settings:
 def test_healthz():
     with TestClient(create_app(settings=settings(api_key=""))) as client:
         assert client.get("/healthz").json() == {"status": "ok"}
+        assert client.get("/health").json() == {"status": "ok"}
 
 
 def test_models_is_openai_compatible():
@@ -48,6 +49,56 @@ def test_missing_key_fails_closed():
         response = client.post(
             "/v1/chat/completions",
             json={"messages": [{"role": "user", "content": "안녕하세요"}]},
+        )
+    assert response.status_code == 503
+
+
+def test_evaluator_bearer_token_is_forwarded_to_l2(monkeypatch):
+    received_keys: list[str] = []
+
+    class RecordingHarness(FakeHarness):
+        def __init__(self, configured, *, http_client):
+            del http_client
+            received_keys.append(configured.api_key)
+            super().__init__(
+                {
+                    "id": "chatcmpl-auth",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": configured.model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": "인증 성공"},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": None,
+                }
+            )
+
+    monkeypatch.setattr("app.main.FastL2Harness", RecordingHarness)
+    application = create_app(settings=settings(api_key=""))
+
+    with TestClient(application) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer evaluator-secret"},
+            json={"messages": [{"role": "user", "content": "질문"}]},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "인증 성공"
+    assert received_keys == ["evaluator-secret"]
+
+
+def test_non_bearer_authorization_is_rejected():
+    application = create_app(settings=settings(api_key=""))
+    with TestClient(application) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Basic invalid"},
+            json={"messages": [{"role": "user", "content": "질문"}]},
         )
     assert response.status_code == 503
 
