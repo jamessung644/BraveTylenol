@@ -19,6 +19,8 @@ from urllib.request import Request, urlopen
 MODEL_ID = "team-chatbot"
 MAX_LATENCY_SECONDS = 165.0
 PREFLIGHT_TIMEOUT_SECONDS = 5.0
+MAX_REQUESTS = 256
+MAX_CONCURRENCY = 32
 _PROCESS_JOIN_SECONDS = 0.1
 _BATCH_OVERHEAD_SECONDS = 2.0
 SAFETY_FALLBACK = (
@@ -131,6 +133,7 @@ def _read_json(
     process = None
     receiver = None
     sender = None
+    process_started = False
     try:
         receiver, sender = multiprocessing.get_context("spawn").Pipe(duplex=False)
         process = multiprocessing.get_context("spawn").Process(
@@ -139,6 +142,7 @@ def _read_json(
             daemon=True,
         )
         process.start()
+        process_started = True
         sender.close()
         sender = None
         remaining = max(0.0, timeout_seconds - (time.perf_counter() - started))
@@ -154,16 +158,25 @@ def _read_json(
         return 0, None
     finally:
         if sender is not None:
-            sender.close()
+            try:
+                sender.close()
+            except OSError:
+                pass
         if receiver is not None:
-            receiver.close()
-        if process is not None:
-            if process.is_alive():
-                process.terminate()
-            process.join(_PROCESS_JOIN_SECONDS)
-            if process.is_alive():
-                process.kill()
+            try:
+                receiver.close()
+            except OSError:
+                pass
+        if process is not None and process_started:
+            try:
+                if process.is_alive():
+                    process.terminate()
                 process.join(_PROCESS_JOIN_SECONDS)
+                if process.is_alive():
+                    process.kill()
+                    process.join(_PROCESS_JOIN_SECONDS)
+            except (AssertionError, OSError):
+                pass
 
 
 def _get_json(base_url: str, path: str, timeout_seconds: float) -> tuple[int, Any | None]:
@@ -219,9 +232,10 @@ def run_completions(
 ) -> list[RequestResult]:
     """Bound total wait while each network operation has its own killable absolute deadline."""
     started = time.perf_counter()
-    batch_budget = math.ceil(requests / concurrency) * deadline_seconds + _BATCH_OVERHEAD_SECONDS
+    workers = effective_workers(requests, concurrency)
+    batch_budget = math.ceil(requests / workers) * deadline_seconds + _BATCH_OVERHEAD_SECONDS
     batch_deadline = started + batch_budget
-    executor = ThreadPoolExecutor(max_workers=concurrency)
+    executor = ThreadPoolExecutor(max_workers=workers)
     futures = [
         executor.submit(send_completion, base_url, deadline_seconds) for _ in range(requests)
     ]
@@ -281,25 +295,61 @@ def _positive(value: str) -> int:
     return parsed
 
 
+def _bounded_positive(value: str, maximum: int) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if 1 <= parsed <= maximum else None
+
+
 def _deadline(value: str) -> float:
-    parsed = float(value)
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return 0.0
     if not 0 < parsed <= MAX_LATENCY_SECONDS:
-        message = f"must be greater than 0 and no more than {MAX_LATENCY_SECONDS}"
-        raise argparse.ArgumentTypeError(message)
+        return 0.0
     return parsed
+
+
+def effective_workers(requests: int, concurrency: int) -> int:
+    return min(requests, concurrency)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate concurrent public completion envelopes.")
     parser.add_argument("--base-url", required=True)
-    parser.add_argument("--requests", type=_positive, default=16)
-    parser.add_argument("--concurrency", type=_positive, default=16)
-    parser.add_argument("--deadline-seconds", type=_deadline, default=MAX_LATENCY_SECONDS)
-    return parser.parse_args()
+    parser.add_argument("--requests", default="16")
+    parser.add_argument("--concurrency", default="16")
+    parser.add_argument("--deadline-seconds", default=str(MAX_LATENCY_SECONDS))
+    raw = parser.parse_args()
+    requests = _bounded_positive(raw.requests, MAX_REQUESTS)
+    concurrency = _bounded_positive(raw.concurrency, MAX_CONCURRENCY)
+    deadline_seconds = _deadline(raw.deadline_seconds)
+    return argparse.Namespace(
+        base_url=raw.base_url,
+        requests=requests,
+        concurrency=concurrency,
+        deadline_seconds=deadline_seconds,
+        valid=requests is not None and concurrency is not None and deadline_seconds > 0,
+    )
 
 
 def main() -> int:
     args = parse_args()
+    if not args.valid:
+        print_summary(
+            {
+                "requests": 0,
+                "success": 0,
+                "fallback": 0,
+                "failure": 1,
+                "status_counts": {0: 1},
+                "latencies": [],
+            }
+        )
+        return 1
     preflight_failures = check_preflight(
         args.base_url,
         timeout_seconds=min(PREFLIGHT_TIMEOUT_SECONDS, args.deadline_seconds),
