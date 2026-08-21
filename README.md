@@ -1,9 +1,9 @@
 # Brave Tylenol — Lunit L2 Medical Chat
 
 Lunit 해커톤 제출용 OpenAI 호환 의료 대화 서비스다. 기본 `AGENT_MODE=direct` 경로는
-속도 우선 L2 1회 직접 생성이다. 공식 MCP를 사용하는 RAG는 `AGENT_MODE=rag`와
-`LUNIT_MCP_URL`을 모두 설정했을 때만 활성화된다. 어느 경로든 **최종 사용자 답변은 항상
-Lunit L2가 생성한 텍스트를 그대로 반환한다.**
+속도 우선 L2 1회 직접 생성이다. 공식 MCP를 사용하는 RAG는 `ENABLE_RAG=true`,
+`AGENT_MODE=rag`, `LUNIT_MCP_URL`을 모두 설정했을 때만 활성화된다. 어느 경로든
+**최종 사용자 답변은 항상 Lunit L2가 생성한 텍스트를 그대로 반환한다.**
 
 자세한 설계와 격리 환경 검토는 [아키텍처 문서](docs/architecture.md)를 참고한다.
 
@@ -58,8 +58,9 @@ Authorization 값이나 전체 응답 본문을 출력하지 않고 실패한다
     Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/v1/chat/completions -ContentType "application/json" -Body $body
 
 요청의 `model`은 선택 항목이다. 생략해도 평가용 모델 ID `team-chatbot`으로 응답한다.
-`max_tokens`도 선택 항목이며, 요청값은 서버 상한을 늘리지 못하고 더 작은 값으로만
-제한한다. 기본 서버 상한은 1,024 토큰이다.
+`max_tokens`와 `max_completion_tokens`도 선택 항목이며, 요청값은 서버 상한을 늘리지
+못하고 더 작은 값으로만 제한한다. text-only content parts, `developer` role,
+`stream: null`도 안전하게 정규화한다. 기본 서버 상한은 1,024 토큰이다.
 
 지원하는 평가 endpoint:
 
@@ -69,7 +70,7 @@ Authorization 값이나 전체 응답 본문을 출력하지 않고 실패한다
 - POST /v1/chat/completions
 - evaluator-facing model ID: team-chatbot
 - 요청의 model 생략 가능
-- 요청의 max_tokens 지원(기본 서버 상한 1,024 이내)
+- 요청의 max_tokens/max_completion_tokens 지원(기본 서버 상한 1,024 이내)
 - 비스트리밍 요청만 지원
 
 ## 4. 실행 모드와 선택 설정
@@ -78,11 +79,13 @@ Authorization 값이나 전체 응답 본문을 출력하지 않고 실패한다
 | --- | --- | --- |
 | LUNIT_FM_API_URL | https://model.hackathon.lunit.io | L2 base URL |
 | LUNIT_FM_MODEL | Lunit/L2-preview | L2 모델 |
+| ENABLE_RAG | false | 명시적인 RAG 활성화 스위치 |
 | AGENT_MODE | direct | direct, rag 또는 passthrough |
-| LUNIT_MCP_URL | 없음 | RAG용 공식 MCP 주소(이 값만으로 RAG가 활성화되지는 않음) |
+| LUNIT_MCP_URL | 없음 | RAG용 공식 MCP 주소(이 값이나 mode만으로 RAG가 활성화되지는 않음) |
 | MAX_MCP_CALLS | 4 | 구성 가능한 상한(평가 지연 방지를 위해 실행당 최대 2회로 추가 제한) |
 | REQUEST_TIMEOUT_SECONDS | 65 | 단일 기본 L2 호출과 복구를 포함한 전체 요청 제한 |
 | L2_RETRY_ATTEMPTS | 1 | 429/502/503/504 제한 재시도(각 L2 단계에서 최초 포함 최대 2회) |
+| MAX_CONCURRENT_L2_REQUESTS | 16 | 동시에 L2로 전달하는 요청 상한(1~64) |
 | MAX_COMPLETION_TOKENS | 1024 | L2 응답의 서버 상한(요청 max_tokens는 이 상한 이하로만 적용) |
 | LUNIT_REASONING_EFFORT | low | 긴 추론 지연을 줄이는 L2 reasoning effort |
 | MAX_TOOL_RESULT_CHARS | 12000 | 개별 도구 결과 크기 제한 |
@@ -94,10 +97,13 @@ Authorization 값이나 전체 응답 본문을 출력하지 않고 실패한다
 
 .env.example 형식을 고정하기 위해 선택 설정은 예제 파일에 넣지 않았다. 제출 컨테이너는
 `AGENT_MODE=direct`로 시작하며, 의료 안전 프롬프트를 포함한 L2를 기본적으로 한 번
-호출한다. `LUNIT_MCP_URL`이 환경에 존재하더라도 direct 모드에서는 MCP에 연결하지 않는다.
-공식 근거 검색이 필요한 배포에서만 `AGENT_MODE=rag`와 `LUNIT_MCP_URL`을 함께 설정한다.
-이때 검색 단계는 전체 요청 제한의 45%, 최대 45초까지만 사용하여 MCP나 검색 플래너가
-느려도 직접 L2 폴백 시간을 남긴다.
+호출한다. legacy `HARNESS_MODE=rag`나 `LUNIT_MCP_URL`이 환경에 남아 있더라도
+`ENABLE_RAG=true`가 없으면 MCP에 연결하지 않는다. 공식 근거 검색이 필요한 배포에서만
+`ENABLE_RAG=true`, `AGENT_MODE=rag`, `LUNIT_MCP_URL`을 함께 설정한다. 이때 검색 단계는
+전체 요청 제한의 45%, 최대 45초까지만 사용하여 MCP나 검색 플래너가 느려도 직접 L2
+폴백 시간을 남긴다. 동시 L2 요청은 CoEval validation의 공식 생성 동시성과 같은 기본
+16개로 제한해 평가 batch를 불필요하게 queue하지 않으면서 과도한 connection-pool
+경합을 막는다.
 
 AGENT_MODE=passthrough는 검색 조정 없이 안전 프롬프트와 입력 대화를 L2에 보내는 진단
 모드다. 기본 direct 모드는 MCP 설정 유무와 관계없이 안전 프롬프트 기반 직접 생성으로
@@ -113,27 +119,46 @@ AGENT_MODE=passthrough는 검색 조정 없이 안전 프롬프트와 입력 대
 테스트는 실제 네트워크나 비밀값을 사용하지 않고 모의 L2/MCP 전송으로 다음을 확인한다.
 
 - L2 Authorization, payload, 재시도, 오류 정리, 응답 검증
+- CoEval형 no-env Bearer preflight와 병렬 batch의 요청별 상태 격리
+- invalid JSON, blank, 잘못된 tool metadata의 제한된 direct 평문 복구
 - .env 로딩, 자리표시자 거부, 비밀값 마스킹
 - L2 직접 답변과 검색 후 최종 L2 답변
 - MCP 도구 발견, 인자 스키마 검증, 인용 선택, 호출/크기 제한
 - MCP 장애 시 L2 폴백과 L2 오류의 올바른 전파
 - OpenAI 호환 응답, HTTP 상태, 로그의 의료 텍스트/비밀정보 배제
 
+### CoEval Docker 계약 테스트
+
+공식 [lunit-io/CoEval의 검증 기준 커밋](https://github.com/lunit-io/CoEval/commit/741263cfafba687f8baeb7422c747ef9557df1c4)의
+`conquer_test` 설정은 제출 컨테이너의 `/v1` endpoint에 `team-chatbot` 모델, 요청당 180초,
+test/validation 동시 생성 12개/16개, `max_tokens=6144`, 최대 2회 시도를 사용한다. 아래
+opt-in 테스트는 현재 작업트리로 Docker 이미지를 직접 빌드하고, 컨테이너에는 API key를
+주입하지 않은 채
+CoEval 형식의 Bearer 요청을 보낸다. health/models, 멀티턴 응답 형식, 동시 12개와 16개
+요청의 HTTP 200·비어 있지 않은 답변·고유 ID를 검증한다.
+
+    RUN_COEVAL_DOCKER=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_coeval_docker.py
+
+Docker daemon과 `.env`의 `LUNIT_FM_API_KEY`가 필요하다. 또는 테스트 전용 키를
+`COEVAL_TEST_API_KEY` 환경변수로 전달할 수 있다. 일반 단위 테스트에서는 실제 네트워크와
+비용을 발생시키지 않도록 이 파일 전체를 skip한다.
+
 ## 6. Docker 제출
 
 Docker가 설치된 환경에서:
 
     docker build -t brave-tylenol:lunit .
-    docker run --rm -p 8000:8000 --env-file .env brave-tylenol:lunit
+    docker run --rm -p 127.0.0.1:8000:8000 brave-tylenol:lunit
 
 이미지는 비루트 사용자로 실행되고 .env, 테스트, 문서, 캐시를 포함하지 않는다. API Key를
-Dockerfile의 ARG/ENV로 빌드하지 않는다. 베이스 이미지는 Python 3.13.15 slim-trixie로,
-주요 런타임 패키지는 로컬 검증 버전으로 고정해 평가 시 SDK 변경을 방지한다.
+Dockerfile의 ARG/ENV로 빌드하거나 전체 `.env`를 컨테이너에 주입하지 않는다. 로컬 채팅은
+평가기와 동일하게 요청의 Bearer header로 키를 전달한다. 베이스 이미지는 Python 3.13.15
+slim-trixie로, 주요 런타임 패키지는 로컬 검증 버전으로 고정해 평가 시 SDK 변경을 방지한다.
 
-현재 개발 PC에는 Docker CLI가 없어 실제 이미지 빌드는 실행하지 못했다. 대신 고정한 공식
-베이스 태그의 존재, Linux amd64/Python 3.13용 전체 의존성 wheel 해석, `.env`가 없는
-컨테이너 유사 환경의 애플리케이션 import를 확인했다. 제출 파이프라인에서 실제 build와
-`/health`, `/v1/models`, Bearer가 전달된 L2 연결을 마지막으로 재확인해야 한다.
+현재 개발 PC의 Colima Docker에서 native 및 `linux/amd64` 이미지를 실제로 빌드하고,
+`.env` 없이 비루트 컨테이너를 기동해 healthy 상태와 `/health`, `/healthz`, `/v1/models`,
+Bearer가 전달된 CoEval형 멀티턴 L2 연결을 확인했다. 위 opt-in 테스트로 동일 검증과 공식
+동시성 batch를 반복할 수 있다.
 
 ## 7. 격리 환경 원칙
 

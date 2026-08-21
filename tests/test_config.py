@@ -41,8 +41,10 @@ def test_latency_controls_have_safe_defaults(monkeypatch):
     monkeypatch.delenv("MAX_COMPLETION_TOKENS", raising=False)
     monkeypatch.delenv("LUNIT_REASONING_EFFORT", raising=False)
     monkeypatch.delenv("L2_RETRY_ATTEMPTS", raising=False)
+    monkeypatch.delenv("MAX_CONCURRENT_L2_REQUESTS", raising=False)
     monkeypatch.delenv("AGENT_MODE", raising=False)
     monkeypatch.delenv("HARNESS_MODE", raising=False)
+    monkeypatch.delenv("ENABLE_RAG", raising=False)
 
     settings = Settings(_env_file=None)
 
@@ -50,15 +52,60 @@ def test_latency_controls_have_safe_defaults(monkeypatch):
     assert settings.max_completion_tokens == 1024
     assert settings.reasoning_effort == "low"
     assert settings.retry_attempts == 1
+    assert settings.max_concurrent_l2_requests == 16
     assert settings.agent_mode == "direct"
+    assert settings.enable_rag is False
+    assert settings.rag_enabled is False
 
 
 def test_container_defaults_to_one_call_direct_mode(monkeypatch):
     monkeypatch.delenv("LUNIT_MCP_URL", raising=False)
+    monkeypatch.delenv("ENABLE_RAG", raising=False)
 
     settings = Settings(_env_file=None)
 
     assert settings.mcp_url is None
+    assert settings.rag_enabled is False
+
+
+def test_legacy_rag_environment_does_not_enable_rag_without_opt_in(monkeypatch):
+    monkeypatch.delenv("AGENT_MODE", raising=False)
+    monkeypatch.delenv("ENABLE_RAG", raising=False)
+    monkeypatch.setenv("HARNESS_MODE", "rag")
+    monkeypatch.setenv("LUNIT_MCP_URL", "https://mcp.injected-by-pipeline.test")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.agent_mode == "rag"
+    assert settings.mcp_url == "https://mcp.injected-by-pipeline.test"
+    assert settings.enable_rag is False
+    assert settings.rag_enabled is False
+
+
+def test_rag_requires_mode_endpoint_and_explicit_opt_in(monkeypatch):
+    monkeypatch.setenv("ENABLE_RAG", "true")
+    monkeypatch.setenv("AGENT_MODE", "direct")
+    monkeypatch.setenv("LUNIT_MCP_URL", "https://mcp.example.test")
+
+    assert Settings(_env_file=None).rag_enabled is False
+
+    monkeypatch.setenv("AGENT_MODE", "rag")
+    monkeypatch.delenv("LUNIT_MCP_URL", raising=False)
+
+    assert Settings(_env_file=None).rag_enabled is False
+
+    monkeypatch.setenv("LUNIT_MCP_URL", "https://mcp.example.test")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.enable_rag is True
+    assert settings.rag_enabled is True
+
+
+def test_concurrent_l2_limit_loads_from_environment(monkeypatch):
+    monkeypatch.setenv("MAX_CONCURRENT_L2_REQUESTS", "12")
+
+    assert Settings(_env_file=None).max_concurrent_l2_requests == 12
 
 
 def test_legacy_baseline_environment_names_remain_supported(monkeypatch):

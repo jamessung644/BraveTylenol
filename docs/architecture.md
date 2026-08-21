@@ -32,7 +32,7 @@
             |
             +-- passthrough --> L2 전달 --> L2 텍스트 그대로 반환
             |
-            +-- rag + MCP URL --> L2 검색 결정 --> retrieve_relevant_content(query)
+            +-- RAG opt-in + rag + MCP URL --> L2 검색 결정 --> retrieve_relevant_content(query)
                                                         |
                                                         v
                                                  MCP 도구 동적 발견
@@ -50,8 +50,9 @@
                                                  L2 최종 텍스트 그대로 반환
 
 기본 컨테이너는 `AGENT_MODE=direct`이므로 MCP URL이 환경에 있어도 안전 프롬프트 기반 L2
-직접 호출을 사용한다. RAG는 `AGENT_MODE=rag`와 `LUNIT_MCP_URL`이 모두 있을 때만
-활성화된다. `AGENT_MODE=rag`인데 URL이 없으면 직접 생성으로 안전하게 폴백한다.
+직접 호출을 사용한다. RAG는 `ENABLE_RAG=true`, `AGENT_MODE=rag`, `LUNIT_MCP_URL`이 모두
+있을 때만 활성화된다. legacy mode나 MCP URL만 남아 있으면 직접 생성으로 안전하게
+폴백한다.
 `AGENT_MODE=passthrough`는 검색 조정 없이 동일한 안전 프롬프트를 적용하는 진단 모드다.
 
 ## 평가 API 계약
@@ -59,8 +60,10 @@
 - `POST /v1/chat/completions`의 `model`은 생략할 수 있다.
 - 모델을 생략한 응답과 `GET /v1/models`에서 사용하는 평가용 모델 ID는
   `team-chatbot`이다.
-- 선택적인 요청 `max_tokens`는 서버 상한을 늘리지 못한다. 기본 서버 상한은 1,024이며,
-  요청값이 더 작을 때만 해당 값으로 L2 호출을 제한한다.
+- 선택적인 요청 `max_tokens` 또는 `max_completion_tokens`는 서버 상한을 늘리지 못한다.
+  기본 서버 상한은 1,024이며, 요청값이 더 작을 때만 해당 값으로 L2 호출을 제한한다.
+- text-only content parts는 문자열로 합치고, `developer` role은 `system`으로 보호하며,
+  `stream: null`은 비스트리밍 요청으로 처리한다.
 - 기본 재시도 횟수는 1회이므로 각 L2 단계의 429/502/503/504 응답에 대해 최초 호출을
   포함해 최대 2회 시도한다. 연결과 connection-pool 대기는 각각 최대 5초이며, 모든 L2
   단계·재시도·빈 응답 복구는 하나의 전체 요청 기한 안에서만 실행된다.
@@ -89,7 +92,9 @@
 | API Key 없음 | 준비 상태는 200, 채팅은 503 |
 | L2 타임아웃 | 504 |
 | L2 전송/응답/형식 오류 | 세부정보를 숨긴 502 |
-| rag 모드에서 MCP URL 없음 또는 연결 실패 | 안전 프롬프트 기반 L2 직접 생성 |
+| direct L2의 blank/invalid JSON/잘못된 tool metadata | 같은 기한 안에서 평문 생성 최대 2회 복구 |
+| RAG opt-in, rag mode, MCP URL 중 하나라도 없음 | 안전 프롬프트 기반 L2 직접 생성 |
+| 활성화된 RAG의 MCP 연결 실패 | 안전 프롬프트 기반 L2 직접 생성 |
 | 개별 MCP 도구 실패 | 검색 L2에 구조화된 오류 전달 |
 | 잘못된 도구 이름/인자 | 실행하지 않고 프로토콜 오류 전달 |
 | MCP 호출 예산 소진 | 수집된 근거를 partial로 L2에 전달 |
@@ -100,7 +105,8 @@
 런타임 네트워크 대상은 다음 두 종류뿐이다.
 
 1. 필수 Lunit L2 endpoint (LUNIT_FM_API_URL)
-2. AGENT_MODE=rag와 LUNIT_MCP_URL을 모두 명시했을 때만 사용하는 대회 공식 MCP endpoint
+2. ENABLE_RAG=true, AGENT_MODE=rag, LUNIT_MCP_URL을 모두 명시했을 때만 사용하는 대회
+   공식 MCP endpoint
 
 일반 웹 검색, 상용 검색 API, 클라우드 벡터 DB, 원격 분석 서비스, 외부 인증 서비스에는
 의존하지 않는다. MCP가 구성되지 않아도 L2-only 폴백으로 동작한다. 컨테이너에는 .env,
@@ -124,6 +130,8 @@ Python 패키지 설치는 이미지 빌드 단계에만 필요하다. 대회 �
 - 모든 L2/MCP I/O는 비동기다.
 - 요청별 오케스트레이터와 검색 상태를 사용해 대화 간 상태 누출을 막는다.
 - L2 HTTP 연결 풀만 FastAPI lifespan 동안 공유한다.
+- 동시 L2 upstream 요청은 `MAX_CONCURRENT_L2_REQUESTS`로 제한하며 CoEval validation의
+  생성 동시성과 같은 기본값 16을 사용한다.
 - MCP 호출 횟수(실행당 최대 2회), 개별 도구 결과, 전체 근거 크기를 제한한다.
 - 선택적 검색은 전체 요청 제한의 45%(최대 45초)까지만 사용해 직접 L2 폴백 시간을 남긴다.
 - 영구 대화 저장이나 교차 요청 캐시는 사용하지 않는다.
