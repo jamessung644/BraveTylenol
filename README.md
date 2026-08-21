@@ -12,7 +12,7 @@ bake it into an image, or pass it as a Docker build argument.
 
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
-| `LUNIT_FM_API_KEY` | Yes for chat | none | Contest L2 API credential. `/v1/models` works without it; chat returns 503. |
+| `LUNIT_FM_API_KEY` | No when caller sends Bearer auth | none | Contest L2 API credential. If unset, chat forwards the request's `Authorization: Bearer …` token. |
 | `LUNIT_FM_API_URL` | No | `https://model.hackathon.lunit.io` | L2 API base URL. |
 | `LUNIT_FM_MODEL` | No | `Lunit/L2-preview` | L2 model identifier. |
 | `LUNIT_MCP_URL` | No | `https://mcp.hackathon.lunit.io/mcp` | Contest MCP endpoint used in `rag` mode. |
@@ -37,8 +37,8 @@ test -n "$LUNIT_FM_API_KEY" && .venv/bin/uvicorn app:app --host 0.0.0.0 --port 8
 
 ## Docker
 
-Build the minimal Python 3.13 runtime image, then inject the credential only
-when starting the container:
+Build the minimal Python 3.13 runtime image. For local use, inject the
+credential only when starting the container:
 
 ```bash
 docker build -t brave-tylenol:baseline .
@@ -58,11 +58,14 @@ Readiness and model discovery do not require the contest credential:
 curl --fail --silent http://127.0.0.1:8000/v1/models
 ```
 
-Call the OpenAI-compatible chat endpoint after starting with the runtime key:
+Call the OpenAI-compatible chat endpoint after starting with the runtime key.
+If the container was started without it, include the same key as Bearer auth;
+the evaluation client uses this OpenAI-compatible path:
 
 ```bash
 curl --fail --silent http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $LUNIT_FM_API_KEY" \
   -d '{"model":"team-chatbot","messages":[{"role":"user","content":"안녕하세요"}]}'
 ```
 
@@ -86,4 +89,5 @@ not part of the credential-free deterministic suite:
    using the contest-provided credential and evaluator settings.
 
 For a credential-free runtime smoke check, start the container without the
-key: `/v1/models` must return 200, while a chat request must return 503.
+key: `/v1/models` must return 200, while a chat request without Bearer auth
+must return 503.
