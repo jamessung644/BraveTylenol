@@ -5,16 +5,19 @@ import uuid
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from time import perf_counter
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from pydantic import SecretStr
 
 from lunit_hackathon.config import Settings
+from lunit_hackathon.credentials import resolve_lunit_api_key
+from lunit_hackathon.deadline import RequestDeadline
 from lunit_hackathon.errors import (
     ConfigurationError,
     MalformedUpstreamResponseError,
+    RetrievalError,
     UpstreamResponseError,
     UpstreamTimeoutError,
     UpstreamTransportError,
@@ -22,7 +25,7 @@ from lunit_hackathon.errors import (
 from lunit_hackathon.generation import GenerationEngine
 from lunit_hackathon.l2_client import L2Client
 from lunit_hackathon.mcp_client import MCPClient
-from lunit_hackathon.orchestrator import ChatOrchestrator
+from lunit_hackathon.orchestrator import MEDICAL_SAFETY_FALLBACK, ChatOrchestrator
 from lunit_hackathon.retrieval import RetrievalEngine
 from lunit_hackathon.schemas import (
     ChatCompletionChoice,
@@ -33,15 +36,30 @@ from lunit_hackathon.schemas import (
     ModelList,
     TokenUsage,
 )
+from lunit_hackathon.verification import AnswerVerifier
 
 logger = logging.getLogger(__name__)
 _EVALUATOR_MODEL_ID = "team-chatbot"
+_EXPECTED_RECOVERY_ERRORS = (
+    ConfigurationError,
+    RetrievalError,
+    MalformedUpstreamResponseError,
+    UpstreamTimeoutError,
+    UpstreamTransportError,
+    UpstreamResponseError,
+    TimeoutError,
+)
 
 
 class OrchestratorProtocol(Protocol):
     last_usage: TokenUsage
+    last_finish_reason: str
 
-    async def answer(self, messages: Sequence[ChatMessage]) -> str: ...
+    async def answer(
+        self,
+        messages: Sequence[ChatMessage],
+        deadline: RequestDeadline,
+    ) -> str: ...
 
 
 def create_app(
@@ -67,33 +85,25 @@ def create_app(
     def build_orchestrator(request_settings: Settings) -> ChatOrchestrator:
         shared_http = getattr(application.state, "l2_http_client", None)
         l2 = L2Client(request_settings, http_client=shared_http)
-        if request_settings.agent_mode == "passthrough":
-            return ChatOrchestrator(
-                l2_client=l2,
-                generation_engine=None,
-                mode="passthrough",
+        generation = GenerationEngine(l2, request_settings)
+        verifier = AnswerVerifier(l2, request_settings)
+        retrieval = None
+        mode = request_settings.agent_mode
+        if mode == "rag" and request_settings.mcp_url:
+            retrieval = RetrievalEngine(
+                l2,
+                MCPClient(request_settings),
+                request_settings,
             )
-
-        # CoEval sends the API key in the request Bearer header and may not
-        # provide an MCP endpoint. Without MCP, preserve the medical system
-        # prompt but avoid a failed retrieval probe and a second L2 call.
-        if request_settings.agent_mode == "direct" or not request_settings.mcp_url:
-            return ChatOrchestrator(
-                l2_client=l2,
-                generation_engine=GenerationEngine(l2, retrieval_engine=None),
-                mode="direct",
-            )
-
-        retrieval = RetrievalEngine(
-            l2,
-            MCPClient(request_settings),
-            request_settings,
-        )
-        generation = GenerationEngine(l2, retrieval)
+        elif mode == "rag":
+            mode = "direct"
         return ChatOrchestrator(
             l2_client=l2,
+            retrieval_engine=retrieval,
             generation_engine=generation,
-            mode="rag",
+            answer_verifier=verifier,
+            settings=request_settings,
+            mode=mode,
         )
 
     @application.middleware("http")
@@ -102,13 +112,12 @@ def create_app(
         started = perf_counter()
         try:
             response = await call_next(request)
-        except Exception as error:
+        except Exception:
             logger.error(
-                "request_failed request_id=%s method=%s path=%s error_type=%s",
+                "request_failed request_id=%s method=%s path=%s error_code=unexpected",
                 request_id,
                 request.method,
                 request.url.path,
-                type(error).__name__,
             )
             raise
         duration_ms = (perf_counter() - started) * 1_000
@@ -150,78 +159,93 @@ def create_app(
     ) -> ChatCompletionResponse:
         if request.stream:
             raise HTTPException(status_code=400, detail="Streaming is not supported")
-        # CoEval owns the credential carried by each request. Prefer it over a
-        # possibly stale deployment-level fallback so one bad environment value
-        # cannot make every otherwise valid evaluation request fail with 401.
-        request_api_key = _bearer_token(authorization) or resolved_settings.api_key
-        if not request_api_key:
-            raise HTTPException(
-                status_code=503,
-                detail="LUNIT_FM_API_KEY is not configured",
-            )
 
-        settings_updates = {"lunit_fm_api_key": SecretStr(request_api_key)}
-        if request.max_tokens is not None:
-            settings_updates["max_completion_tokens"] = min(
-                request.max_tokens,
-                resolved_settings.max_completion_tokens,
-            )
-        request_settings = resolved_settings.model_copy(update=settings_updates)
-        active_orchestrator = orchestrator or build_orchestrator(request_settings)
+        deadline = RequestDeadline.start(
+            total_seconds=resolved_settings.request_timeout_seconds,
+        )
+        active_orchestrator: OrchestratorProtocol | None = None
         try:
-            async with asyncio.timeout(request_settings.request_timeout_seconds):
-                answer = await active_orchestrator.answer(request.messages)
-        except TimeoutError as error:
-            raise HTTPException(status_code=504, detail="L2 upstream timed out") from error
-        except ConfigurationError as error:
-            raise HTTPException(status_code=503, detail=str(error)) from error
-        except UpstreamTimeoutError as error:
-            raise HTTPException(status_code=504, detail="L2 upstream timed out") from error
-        except (
-            UpstreamTransportError,
-            UpstreamResponseError,
-            MalformedUpstreamResponseError,
-        ) as error:
-            raise HTTPException(
-                status_code=502,
-                detail="L2 upstream request failed",
-            ) from error
+            request_settings = _request_settings(
+                resolved_settings,
+                authorization,
+                request.max_tokens,
+            )
+            active_orchestrator = orchestrator or build_orchestrator(request_settings)
+            async with asyncio.timeout(deadline.remaining()):
+                answer = await active_orchestrator.answer(request.messages, deadline)
+            if not isinstance(answer, str) or not answer.strip():
+                answer = MEDICAL_SAFETY_FALLBACK
+        except _EXPECTED_RECOVERY_ERRORS as error:
+            logger.warning("completion_recovery error_code=%s", _error_code(error))
+            answer = MEDICAL_SAFETY_FALLBACK
 
+        usage = _nonnegative_usage(
+            getattr(active_orchestrator, "last_usage", TokenUsage()),
+        )
         return ChatCompletionResponse(
             id=f"chatcmpl-{uuid.uuid4()}",
             created=int(time.time()),
-            model=request.model or _EVALUATOR_MODEL_ID,
+            model=_EVALUATOR_MODEL_ID,
             choices=[
                 ChatCompletionChoice(
                     index=0,
                     message=ChatMessage(role="assistant", content=answer),
-                    finish_reason=_public_finish_reason(
-                        getattr(active_orchestrator, "last_finish_reason", None)
-                    ),
+                    finish_reason="stop",
                 )
             ],
-            usage=getattr(active_orchestrator, "last_usage", TokenUsage()),
+            usage=usage,
         )
 
     return application
 
 
-def _bearer_token(authorization: str | None) -> str | None:
-    if not authorization:
-        return None
-    scheme, separator, token = authorization.partition(" ")
-    if not separator or scheme.lower() != "bearer":
-        return None
-    token = token.strip()
-    return token or None
+def _request_settings(
+    settings: Settings,
+    authorization: str | None,
+    requested_max_tokens: int | None,
+) -> Settings:
+    api_key = resolve_lunit_api_key(authorization, settings.api_key)
+    updates: dict[str, Any] = {"lunit_fm_api_key": SecretStr(api_key)}
+    if requested_max_tokens is not None:
+        updates["max_completion_tokens"] = min(
+            requested_max_tokens,
+            settings.max_completion_tokens,
+        )
+    return settings.model_copy(update=updates)
 
 
-def _public_finish_reason(reason: str | None) -> str:
-    # Internal retrieval/finalization tools are fully resolved before this API
-    # response, which exposes only a normal assistant text message.
-    if reason in {"tool_calls", "function_call"}:
-        return "stop"
-    return reason or "stop"
+def _nonnegative_usage(value: Any) -> TokenUsage:
+    prompt_tokens = _nonnegative_int(getattr(value, "prompt_tokens", 0))
+    completion_tokens = _nonnegative_int(getattr(value, "completion_tokens", 0))
+    total_tokens = max(
+        _nonnegative_int(getattr(value, "total_tokens", 0)),
+        prompt_tokens + completion_tokens,
+    )
+    return TokenUsage(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=total_tokens,
+    )
+
+
+def _nonnegative_int(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _error_code(error: BaseException) -> str:
+    if isinstance(error, ConfigurationError):
+        return "configuration"
+    if isinstance(error, RetrievalError):
+        return error.code
+    if isinstance(error, UpstreamTimeoutError | TimeoutError):
+        return "timeout"
+    if isinstance(error, UpstreamTransportError):
+        return "transport"
+    if isinstance(error, MalformedUpstreamResponseError):
+        return "malformed"
+    if isinstance(error, UpstreamResponseError):
+        return "upstream_response"
+    return "unknown"
 
 
 app = create_app()
