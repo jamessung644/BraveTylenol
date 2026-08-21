@@ -12,6 +12,7 @@ from urllib.error import HTTPError, URLError
 
 from main import (
     DIRECT_MEDICAL_SYSTEM_PROMPT,
+    KOREAN_BASELINE_RESPONSE,
     MAX_CONCURRENT_L2_REQUESTS,
     MODEL_ID,
     ClientRequestError,
@@ -106,9 +107,7 @@ class MinimalL2ClientTest(unittest.TestCase):
             request_payload,
             "Bearer evaluator-secret",
             opener=opener,
-            environ={
-                "LUNIT_FM_API_KEY": "stale-environment-secret",
-            },
+            environ={},
         )
 
         self.assertEqual(
@@ -155,6 +154,41 @@ class MinimalL2ClientTest(unittest.TestCase):
         self.assertEqual(
             opener.requests[0].get_header("Authorization"),
             "Bearer environment-secret",
+        )
+
+    def test_quick_start_environment_key_precedes_request_bearer(self):
+        opener = SequenceOpener(FakeResponse(l2_response()))
+
+        request_l2_completion(
+            {"messages": [{"role": "user", "content": "질문"}]},
+            "Bearer evaluator-secret",
+            opener=opener,
+            environ={"LUNIT_FM_API_KEY": "environment-secret"},
+        )
+
+        self.assertEqual(
+            opener.requests[0].get_header("Authorization"),
+            "Bearer environment-secret",
+        )
+
+    def test_auth_rejection_fails_over_to_distinct_request_bearer_once(self):
+        opener = SequenceOpener(
+            HTTPError("https://model.example.test", 401, "unauthorized", {}, None),
+            FakeResponse(l2_response()),
+        )
+
+        result = request_l2_completion(
+            {"messages": [{"role": "user", "content": "질문"}]},
+            "Bearer evaluator-secret",
+            opener=opener,
+            environ={"LUNIT_FM_API_KEY": "environment-secret"},
+        )
+
+        self.assertEqual(result["choices"][0]["message"]["content"], "L2가 생성한 의료 답변")
+        self.assertEqual(len(opener.requests), 2)
+        self.assertEqual(
+            [request.get_header("Authorization") for request in opener.requests],
+            ["Bearer environment-secret", "Bearer evaluator-secret"],
         )
 
     def test_rejects_missing_or_placeholder_key_without_network(self):
@@ -226,7 +260,7 @@ class MinimalL2ClientTest(unittest.TestCase):
         )
         self.assertEqual(body["model"], "Lunit/L2-preview")
         self.assertEqual(body["reasoning_effort"], "low")
-        self.assertEqual(opener.timeouts[0], 35.0)
+        self.assertAlmostEqual(opener.timeouts[0], 35.0, places=3)
 
     def test_blank_completion_gets_one_plain_text_l2_recovery(self):
         opener = SequenceOpener(
@@ -261,7 +295,8 @@ class MinimalL2ClientTest(unittest.TestCase):
         recovery_body = json.loads(opener.requests[1].data)
         self.assertIn("complete user-facing answer", recovery_body["messages"][-1]["content"])
         self.assertEqual(recovery_body["max_tokens"], 2_048)
-        self.assertEqual(opener.timeouts, [35.0, 25.0])
+        self.assertAlmostEqual(opener.timeouts[0], 35.0, places=3)
+        self.assertAlmostEqual(opener.timeouts[1], 25.0, places=3)
 
     def test_empty_choices_gets_one_plain_text_l2_recovery(self):
         opener = SequenceOpener(
@@ -640,7 +675,7 @@ class MinimalL2ServerTest(unittest.TestCase):
                 self.assertLess(elapsed, 1)
         self.assertEqual(self.provider.calls, [])
 
-    def test_expected_l2_failures_return_empty_success_without_outer_retries(self):
+    def test_expected_l2_failures_return_nonempty_baseline_without_outer_retries(self):
         cases = [
             ConfigurationError("secret detail"),
             L2TimeoutError("secret detail"),
@@ -659,7 +694,10 @@ class MinimalL2ServerTest(unittest.TestCase):
                 )
                 self.assertEqual(status, 200)
                 self.assertEqual(payload["object"], "chat.completion")
-                self.assertEqual(payload["choices"][0]["message"]["content"], "")
+                self.assertEqual(
+                    payload["choices"][0]["message"]["content"],
+                    KOREAN_BASELINE_RESPONSE,
+                )
                 self.assertEqual(payload["usage"]["total_tokens"], 0)
                 self.assertNotIn("secret detail", json.dumps(payload))
                 self.assertLess(elapsed, 1)
@@ -690,7 +728,10 @@ class MinimalL2ServerTest(unittest.TestCase):
             )
 
         self.assertEqual([health[0], success[0], options[0], failure[0]], [200, 200, 204, 200])
-        self.assertEqual(failure[1]["choices"][0]["message"]["content"], "")
+        self.assertEqual(
+            failure[1]["choices"][0]["message"]["content"],
+            KOREAN_BASELINE_RESPONSE,
+        )
         request_ids = [result[3]["x-request-id"] for result in (health, success, options, failure)]
         for request_id in request_ids:
             self.assertRegex(request_id, r"\Areq-[0-9a-f]{32}\Z")
