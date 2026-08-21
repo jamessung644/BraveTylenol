@@ -1,173 +1,500 @@
 import json
-from collections.abc import Sequence
-from typing import Any
 
-import pytest
-
-from harness.errors import MalformedUpstreamResponseError
-from harness.generation import GenerationEngine
-from harness.schemas import (
+from lunit_hackathon.generation import GenerationEngine
+from lunit_hackathon.schemas import (
     ChatMessage,
     EvidenceItem,
-    FunctionCall,
     L2Completion,
     RetrievalResult,
     ToolCall,
 )
 
 
-def tool_call(identifier: str, name: str, arguments: object) -> ToolCall:
-    return ToolCall(id=identifier, function=FunctionCall(name=name, arguments=json.dumps(arguments)))
+def tool_call(call_id: str, name: str, arguments: dict | str) -> ToolCall:
+    raw = arguments if isinstance(arguments, str) else json.dumps(arguments)
+    return ToolCall(
+        id=call_id,
+        function={"name": name, "arguments": raw},
+    )
 
 
-class ScriptedL2Client:
-    def __init__(self, completions: list[L2Completion]) -> None:
-        self.completions = completions
-        self.calls: list[dict[str, Any]] = []
+class ScriptedL2:
+    def __init__(self, completions):
+        self.completions = list(completions)
+        self.calls = []
 
-    async def complete(self, **kwargs: object) -> L2Completion:
+    async def complete(self, **kwargs):
         self.calls.append(kwargs)
         return self.completions.pop(0)
 
 
-class FakeRetrievalEngine:
-    def __init__(self, result: RetrievalResult | None = None) -> None:
-        self.queries: list[str] = []
-        self.result = result or RetrievalResult(status="no_evidence")
+class FakeRetrieval:
+    def __init__(self):
+        self.queries = []
 
-    async def retrieve(self, query: str) -> RetrievalResult:
+    async def retrieve(self, query):
         self.queries.append(query)
-        return self.result
+        return RetrievalResult(
+            status="sufficient",
+            items=[
+                EvidenceItem(
+                    cite_uid="guideline:1",
+                    source_tool="guideline_search",
+                    relevance_score=0.95,
+                    content='{"cite_uid":"guideline:1","text":"근거"}',
+                )
+            ],
+        )
 
 
-async def test_generation_returns_direct_l2_content_without_retrieval():
-    l2 = ScriptedL2Client([L2Completion(content="  충분히 답할 수 있습니다.  ")])
-    retrieval = FakeRetrievalEngine()
+async def test_generation_returns_direct_l2_text_verbatim():
+    l2 = ScriptedL2([L2Completion(content="  L2 원문 답변  ")])
+    retrieval = FakeRetrieval()
 
-    answer = await GenerationEngine(l2, retrieval).answer([
-        ChatMessage(role="user", content="물을 충분히 마셔야 하나요?")
-    ])
+    answer = await GenerationEngine(l2, retrieval).answer(
+        [ChatMessage(role="user", content="질문")]
+    )
 
-    assert answer == "  충분히 답할 수 있습니다.  "
+    assert answer == "  L2 원문 답변  "
     assert retrieval.queries == []
-    assert [tool["function"]["name"] for tool in l2.calls[0]["tools"]] == ["retrieve_relevant_content"]
-    assert l2.calls[0]["tool_choice"] == "auto"
+    assert l2.calls[0]["tools"][0]["function"]["name"] == "retrieve_relevant_content"
+    assert l2.calls[0]["messages"][-1]["content"] == "질문"
 
 
-async def test_generation_feeds_retrieval_result_back_to_l2():
-    l2 = ScriptedL2Client([
-        L2Completion(tool_calls=[tool_call("r1", "retrieve_relevant_content", {"query": "한국 고혈압 진료지침 목표 혈압"})]),
-        L2Completion(content="근거를 반영한 최종 답변입니다."),
-    ])
-    retrieval = FakeRetrievalEngine(RetrievalResult(
-        status="sufficient",
-        items=[EvidenceItem(cite_uid="g:1", relevance_score=0.9, source_tool="index_get_page_content", content="근거")],
-        note="지침 확인",
-    ))
+async def test_generation_retrieves_then_returns_second_l2_text():
+    l2 = ScriptedL2(
+        [
+            L2Completion(
+                tool_calls=[
+                    tool_call(
+                        "retrieve-1",
+                        "retrieve_relevant_content",
+                        {"query": "한국 고혈압 목표 혈압 진료지침"},
+                    )
+                ]
+            ),
+            L2Completion(content="근거를 반영한 L2 최종 답변 guideline:1"),
+        ]
+    )
+    retrieval = FakeRetrieval()
 
-    answer = await GenerationEngine(l2, retrieval).answer([ChatMessage(role="user", content="목표 혈압은?")])
+    answer = await GenerationEngine(l2, retrieval).answer(
+        [ChatMessage(role="user", content="목표 혈압은?")]
+    )
 
-    assert answer == "근거를 반영한 최종 답변입니다."
-    assert retrieval.queries == ["한국 고혈압 진료지침 목표 혈압"]
-    assert l2.calls[1]["messages"][-1]["role"] == "tool"
-    assert l2.calls[1]["messages"][-1]["tool_call_id"] == "r1"
-    assert json.loads(l2.calls[1]["messages"][-1]["content"]) == {
-        "items": [{"cite_uid": "g:1", "content": "근거", "relevance_score": 0.9, "source_tool": "index_get_page_content"}],
-        "note": "지침 확인",
-        "status": "sufficient",
-    }
-    assert "tools" not in l2.calls[1]
+    assert answer == "근거를 반영한 L2 최종 답변 guideline:1"
+    assert retrieval.queries == ["한국 고혈압 목표 혈압 진료지침"]
+    tool_message = l2.calls[1]["messages"][-2]
+    assert tool_message["role"] == "tool"
+    assert tool_message["tool_call_id"] == "retrieve-1"
+    assert "guideline:1" in tool_message["content"]
+    grounding = l2.calls[1]["messages"][-1]
+    assert grounding["role"] == "system"
+    assert "guideline:1" in grounding["content"]
+    assert "verbatim" in grounding["content"]
+    assert l2.calls[1]["tools"][0]["function"]["name"] == "submit_final_answer"
+    assert l2.calls[1]["tool_choice"]["function"]["name"] == "submit_final_answer"
 
 
-async def test_generation_prepends_prompt_and_preserves_complete_multiturn_conversation():
-    l2 = ScriptedL2Client([L2Completion(content="답변")])
-    messages: Sequence[ChatMessage] = [
-        ChatMessage(role="system", content="evaluator system"),
-        ChatMessage(role="user", content="첫 질문"),
-        ChatMessage(role="assistant", content="첫 답"),
-        ChatMessage(role="user", content="그럼 다음은?")
+async def test_generation_forces_retrieval_for_official_kcd_evidence():
+    l2 = ScriptedL2(
+        [
+            L2Completion(
+                tool_calls=[
+                    tool_call(
+                        "retrieve-1",
+                        "retrieve_relevant_content",
+                        {"query": "KCD-8 I10 공식 근거"},
+                    )
+                ]
+            ),
+            L2Completion(content="공식 근거 답변 guideline:1"),
+        ]
+    )
+    retrieval = FakeRetrieval()
+
+    answer = await GenerationEngine(l2, retrieval).answer(
+        [ChatMessage(role="user", content="KCD-8 I10의 공식 근거와 출처를 알려줘")]
+    )
+
+    assert answer == "공식 근거 답변 guideline:1"
+    assert l2.calls[0]["tool_choice"]["function"]["name"] == ("retrieve_relevant_content")
+
+
+async def test_generation_asks_l2_to_correct_missing_citation_identifier():
+    l2 = ScriptedL2(
+        [
+            L2Completion(
+                tool_calls=[
+                    tool_call(
+                        "retrieve-1",
+                        "retrieve_relevant_content",
+                        {"query": "공식 진료지침"},
+                    )
+                ]
+            ),
+            L2Completion(content="번호 인용만 있는 답변 [1]"),
+            L2Completion(content="교정된 최종 답변 guideline:1"),
+        ]
+    )
+
+    answer = await GenerationEngine(l2, FakeRetrieval()).answer(
+        [ChatMessage(role="user", content="공식 진료지침 출처를 알려줘")]
+    )
+
+    assert answer == "교정된 최종 답변 guideline:1"
+    correction = l2.calls[2]["messages"][-1]
+    assert correction["role"] == "system"
+    assert "guideline:1" in correction["content"]
+    assert "numbered citations" in correction["content"]
+
+
+async def test_generation_accepts_one_exact_identifier_from_multiple_evidence_items():
+    class MultipleEvidenceRetrieval:
+        async def retrieve(self, query):
+            del query
+            return RetrievalResult(
+                status="sufficient",
+                items=[
+                    EvidenceItem(
+                        cite_uid=f"source:{index}",
+                        source_tool="lookup",
+                        relevance_score=0.9,
+                        content=f'{{"cite_uid":"source:{index}"}}',
+                    )
+                    for index in range(2)
+                ],
+            )
+
+    l2 = ScriptedL2(
+        [
+            L2Completion(
+                tool_calls=[
+                    tool_call(
+                        "retrieve-1",
+                        "retrieve_relevant_content",
+                        {"query": "공식 근거"},
+                    )
+                ]
+            ),
+            L2Completion(content="첫 근거만 사용한 답변 source:0"),
+        ]
+    )
+
+    answer = await GenerationEngine(l2, MultipleEvidenceRetrieval()).answer(
+        [ChatMessage(role="user", content="공식 근거를 알려줘")]
+    )
+
+    assert answer == "첫 근거만 사용한 답변 source:0"
+    assert len(l2.calls) == 2
+
+
+async def test_generation_returns_l2_correction_if_identifier_is_still_missing():
+    l2 = ScriptedL2(
+        [
+            L2Completion(
+                tool_calls=[
+                    tool_call(
+                        "retrieve-1",
+                        "retrieve_relevant_content",
+                        {"query": "공식 근거"},
+                    )
+                ]
+            ),
+            L2Completion(content="번호 인용 답변 [1]"),
+            L2Completion(content="식별자를 여전히 생략한 L2 교정 답변"),
+        ]
+    )
+
+    answer = await GenerationEngine(l2, FakeRetrieval()).answer(
+        [ChatMessage(role="user", content="공식 근거를 알려줘")]
+    )
+
+    assert answer == "식별자를 여전히 생략한 L2 교정 답변"
+
+
+async def test_generation_rewrites_textual_tool_protocol_after_no_evidence():
+    class NoEvidenceRetrieval:
+        async def retrieve(self, query):
+            del query
+            return RetrievalResult(status="no_evidence", note="not found")
+
+    l2 = ScriptedL2(
+        [
+            L2Completion(
+                tool_calls=[
+                    tool_call(
+                        "retrieve-1",
+                        "retrieve_relevant_content",
+                        {"query": "식약처 제품 근거"},
+                    )
+                ]
+            ),
+            L2Completion(
+                content=("<tool_call>retrieve_relevant_content<arg_key>query</arg_key></tool_call>")
+            ),
+            L2Completion(content="공식 제품 근거를 찾지 못했습니다."),
+        ]
+    )
+
+    answer = await GenerationEngine(l2, NoEvidenceRetrieval()).answer(
+        [ChatMessage(role="user", content="식약처 근거를 알려줘")]
+    )
+
+    assert answer == "공식 제품 근거를 찾지 못했습니다."
+    rewrite = l2.calls[2]["messages"][-1]
+    assert rewrite["role"] == "system"
+    assert "without tool-call syntax" in rewrite["content"]
+
+
+async def test_generation_returns_structured_l2_final_submission():
+    l2 = ScriptedL2(
+        [
+            L2Completion(
+                tool_calls=[
+                    tool_call(
+                        "retrieve-1",
+                        "retrieve_relevant_content",
+                        {"query": "공식 진료지침"},
+                    )
+                ]
+            ),
+            L2Completion(
+                tool_calls=[
+                    tool_call(
+                        "submit-1",
+                        "submit_final_answer",
+                        {"answer": "L2 구조화 최종 답변 guideline:1"},
+                    )
+                ]
+            ),
+        ]
+    )
+
+    answer = await GenerationEngine(l2, FakeRetrieval()).answer(
+        [ChatMessage(role="user", content="공식 진료지침 출처를 알려줘")]
+    )
+
+    assert answer == "L2 구조화 최종 답변 guideline:1"
+    assert len(l2.calls) == 2
+
+
+async def test_generation_accepts_extra_fields_in_l2_final_submission():
+    l2 = ScriptedL2(
+        [
+            L2Completion(
+                tool_calls=[
+                    tool_call(
+                        "retrieve-1",
+                        "retrieve_relevant_content",
+                        {"query": "공식 진료지침", "ignored_hint": "extra"},
+                    )
+                ]
+            ),
+            L2Completion(
+                tool_calls=[
+                    tool_call(
+                        "submit-1",
+                        "submit_final_answer",
+                        {
+                            "answer": "여분 필드가 있는 최종 답변 guideline:1",
+                            "ignored_metadata": True,
+                        },
+                    )
+                ]
+            ),
+        ]
+    )
+    retrieval = FakeRetrieval()
+
+    answer = await GenerationEngine(l2, retrieval).answer(
+        [ChatMessage(role="user", content="공식 진료지침 출처를 알려줘")]
+    )
+
+    assert answer == "여분 필드가 있는 최종 답변 guideline:1"
+    assert retrieval.queries == ["공식 진료지침"]
+
+
+async def test_generation_uses_text_alongside_invalid_final_tool_call():
+    l2 = ScriptedL2(
+        [
+            L2Completion(
+                tool_calls=[
+                    tool_call(
+                        "retrieve-1",
+                        "retrieve_relevant_content",
+                        {"query": "공식 진료지침"},
+                    )
+                ]
+            ),
+            L2Completion(
+                content="도구 인자는 잘못됐지만 사용 가능한 답변 guideline:1",
+                tool_calls=[tool_call("submit-bad", "submit_final_answer", {})],
+            ),
+        ]
+    )
+
+    answer = await GenerationEngine(l2, FakeRetrieval()).answer(
+        [ChatMessage(role="user", content="공식 진료지침 출처를 알려줘")]
+    )
+
+    assert answer == "도구 인자는 잘못됐지만 사용 가능한 답변 guideline:1"
+    assert len(l2.calls) == 2
+
+
+async def test_generation_retries_invalid_final_submission_without_tools():
+    l2 = ScriptedL2(
+        [
+            L2Completion(
+                tool_calls=[
+                    tool_call(
+                        "retrieve-1",
+                        "retrieve_relevant_content",
+                        {"query": "공식 진료지침"},
+                    )
+                ]
+            ),
+            L2Completion(tool_calls=[tool_call("submit-bad", "submit_final_answer", {})]),
+            L2Completion(content="일반 completion으로 복구한 답변 guideline:1"),
+        ]
+    )
+
+    answer = await GenerationEngine(l2, FakeRetrieval()).answer(
+        [ChatMessage(role="user", content="공식 진료지침 출처를 알려줘")]
+    )
+
+    assert answer == "일반 completion으로 복구한 답변 guideline:1"
+    assert "tools" not in l2.calls[2]
+    assert "tool_choice" not in l2.calls[2]
+
+
+async def test_generation_handles_only_invalid_initial_tool_calls():
+    l2 = ScriptedL2(
+        [
+            L2Completion(tool_calls=[tool_call("bad", "unexpected", {})]),
+            L2Completion(content="도구 없이 생성한 L2 최종 답변"),
+        ]
+    )
+
+    answer = await GenerationEngine(l2, FakeRetrieval()).answer(
+        [ChatMessage(role="user", content="질문")]
+    )
+
+    assert answer == "도구 없이 생성한 L2 최종 답변"
+
+
+async def test_generation_does_not_expose_textual_protocol_from_initial_step():
+    l2 = ScriptedL2(
+        [
+            L2Completion(
+                content=("<tool_call>retrieve_relevant_content<arg_key>query</arg_key></tool_call>")
+            ),
+            L2Completion(
+                tool_calls=[
+                    tool_call(
+                        "submit-1",
+                        "submit_final_answer",
+                        {"answer": "근거 검색 없이 생성한 L2 답변"},
+                    )
+                ]
+            ),
+        ]
+    )
+
+    answer = await GenerationEngine(l2, FakeRetrieval()).answer(
+        [ChatMessage(role="user", content="질문")]
+    )
+
+    assert answer == "근거 검색 없이 생성한 L2 답변"
+    assert len(l2.calls) == 2
+
+
+async def test_generation_executes_only_first_valid_retrieval():
+    l2 = ScriptedL2(
+        [
+            L2Completion(
+                tool_calls=[
+                    tool_call("bad", "unknown_tool", {}),
+                    tool_call("one", "retrieve_relevant_content", {"query": "query one"}),
+                    tool_call("two", "retrieve_relevant_content", {"query": "query two"}),
+                ]
+            ),
+            L2Completion(content="최종 guideline:1"),
+        ]
+    )
+    retrieval = FakeRetrieval()
+
+    assert (
+        await GenerationEngine(l2, retrieval).answer([ChatMessage(role="user", content="질문")])
+        == "최종 guideline:1"
+    )
+    assert retrieval.queries == ["query one"]
+    tool_messages = [message for message in l2.calls[1]["messages"] if message["role"] == "tool"]
+    assert [message["tool_call_id"] for message in tool_messages] == [
+        "bad",
+        "one",
+        "two",
     ]
 
-    await GenerationEngine(l2, FakeRetrievalEngine()).answer(messages)
 
-    sent = l2.calls[0]["messages"]
-    assert sent[1:] == [message.model_dump(exclude_none=True) for message in messages]
+async def test_direct_answer_uses_medical_prompt_but_no_tools():
+    l2 = ScriptedL2([L2Completion(content="안전한 직접 답변")])
+    engine = GenerationEngine(l2, FakeRetrieval())
+
+    answer = await engine.direct_answer([ChatMessage(role="user", content="질문")])
+
+    assert answer == "안전한 직접 답변"
+    assert l2.calls[0]["messages"][0]["role"] == "system"
+    assert "no more than 300 words" in l2.calls[0]["messages"][0]["content"]
+    assert "No retrieval or other tools are available" in l2.calls[0]["messages"][0]["content"]
+    assert "call retrieve_relevant_content" not in l2.calls[0]["messages"][0]["content"]
+    assert l2.calls[0]["messages"][-1]["content"] == "질문"
+    assert "tools" not in l2.calls[0]
 
 
-@pytest.mark.parametrize("arguments", [{}, {"query": ""}, {"query": "   "}, {"query": 42}, {"query": "x", "extra": "no"}])
-async def test_generation_returns_protocol_error_for_invalid_retrieval_arguments(arguments: object):
-    l2 = ScriptedL2Client([
-        L2Completion(tool_calls=[tool_call("bad", "retrieve_relevant_content", arguments)]),
-        L2Completion(content="직접 답변"),
-    ])
-    retrieval = FakeRetrievalEngine()
+async def test_direct_answer_rewrites_textual_tool_protocol_without_tools():
+    l2 = ScriptedL2(
+        [
+            L2Completion(
+                content="<tool_call>retrieve_relevant_content</tool_call>",
+            ),
+            L2Completion(content="도구 프로토콜을 제거한 최종 답변"),
+        ]
+    )
 
-    answer = await GenerationEngine(l2, retrieval).answer([ChatMessage(role="user", content="질문")])
+    answer = await GenerationEngine(l2, FakeRetrieval()).direct_answer(
+        [ChatMessage(role="user", content="질문")]
+    )
 
-    assert answer == "직접 답변"
+    assert answer == "도구 프로토콜을 제거한 최종 답변"
+    assert len(l2.calls) == 2
+    assert all("tools" not in call for call in l2.calls)
+    assert all("tool_choice" not in call for call in l2.calls)
+
+
+async def test_direct_answer_recovers_structured_tool_call_without_executing_it():
+    l2 = ScriptedL2(
+        [
+            L2Completion(
+                tool_calls=[
+                    tool_call(
+                        "hallucinated-1",
+                        "retrieve_relevant_content",
+                        {"query": "사용하면 안 되는 검색"},
+                    )
+                ]
+            ),
+            L2Completion(content="도구 없이 복구한 최종 답변"),
+        ]
+    )
+    retrieval = FakeRetrieval()
+
+    answer = await GenerationEngine(l2, retrieval).direct_answer(
+        [ChatMessage(role="user", content="질문")]
+    )
+
+    assert answer == "도구 없이 복구한 최종 답변"
     assert retrieval.queries == []
-    assert json.loads(l2.calls[1]["messages"][-1]["content"])["error"] == "invalid retrieval request"
-
-
-async def test_generation_returns_protocol_error_for_unexpected_tool_name():
-    l2 = ScriptedL2Client([
-        L2Completion(tool_calls=[tool_call("bad", "unexpected_tool", {})]),
-        L2Completion(content="직접 답변"),
-    ])
-
-    answer = await GenerationEngine(l2, FakeRetrievalEngine()).answer([ChatMessage(role="user", content="질문")])
-
-    assert answer == "직접 답변"
-    assert json.loads(l2.calls[1]["messages"][-1]["content"])["error"] == "unexpected tool"
-
-
-async def test_generation_executes_only_first_valid_retrieval_and_reports_other_calls():
-    l2 = ScriptedL2Client([
-        L2Completion(tool_calls=[
-            tool_call("bad", "unexpected_tool", {}),
-            tool_call("good", "retrieve_relevant_content", {"query": "완전한 질문"}),
-            tool_call("again", "retrieve_relevant_content", {"query": "다른 질문"}),
-        ]),
-        L2Completion(content="최종 답변"),
-    ])
-    retrieval = FakeRetrievalEngine()
-
-    answer = await GenerationEngine(l2, retrieval).answer([ChatMessage(role="user", content="질문")])
-
-    assert answer == "최종 답변"
-    assert retrieval.queries == ["완전한 질문"]
-    tool_messages = l2.calls[1]["messages"][-3:]
-    assert [message["tool_call_id"] for message in tool_messages] == ["bad", "good", "again"]
-    assert json.loads(tool_messages[0]["content"])["error"] == "unexpected tool"
-    assert json.loads(tool_messages[2]["content"])["error"] == "retrieval already used"
-
-
-async def test_generation_reuses_evidence_and_forces_text_after_second_retrieval_request():
-    l2 = ScriptedL2Client([
-        L2Completion(tool_calls=[tool_call("first", "retrieve_relevant_content", {"query": "완전한 질문"})]),
-        L2Completion(tool_calls=[tool_call("second", "retrieve_relevant_content", {"query": "또 다른 질문"})]),
-        L2Completion(content="강제된 최종 답변"),
-    ])
-    retrieval = FakeRetrievalEngine(RetrievalResult(status="no_evidence", note="찾지 못함"))
-
-    answer = await GenerationEngine(l2, retrieval).answer([ChatMessage(role="user", content="질문")])
-
-    assert answer == "강제된 최종 답변"
-    assert retrieval.queries == ["완전한 질문"]
-    assert l2.calls[2]["messages"][-2]["role"] == "tool"
-    assert l2.calls[2]["messages"][-2]["tool_call_id"] == "second"
-    assert l2.calls[2]["messages"][-2]["content"] == l2.calls[1]["messages"][-1]["content"]
-    assert l2.calls[2]["messages"][-1]["role"] == "system"
-    assert "text answer" in l2.calls[2]["messages"][-1]["content"]
-
-
-@pytest.mark.parametrize("completion", [L2Completion(), L2Completion(content="   "), L2Completion(tool_calls=[tool_call("again", "retrieve_relevant_content", {"query": "x"})])])
-async def test_generation_rejects_blank_or_tool_only_final_content(completion: L2Completion):
-    l2 = ScriptedL2Client([
-        L2Completion(tool_calls=[tool_call("first", "retrieve_relevant_content", {"query": "완전한 질문"})]),
-        completion,
-        L2Completion(content=" ") if completion.tool_calls else L2Completion(content="unused"),
-    ])
-
-    with pytest.raises(MalformedUpstreamResponseError):
-        await GenerationEngine(l2, FakeRetrievalEngine()).answer([ChatMessage(role="user", content="질문")])
+    assert len(l2.calls) == 2
+    assert all("tools" not in call for call in l2.calls)
+    assert all("tool_choice" not in call for call in l2.calls)
