@@ -45,6 +45,34 @@ async def test_passthrough_sends_original_messages_directly_to_l2():
     assert orchestrator.last_usage.total_tokens == 8
 
 
+async def test_direct_mode_uses_one_medically_prompted_l2_generation():
+    class DirectGeneration:
+        def __init__(self):
+            self.calls = []
+
+        async def direct_answer(self, messages):
+            self.calls.append(messages)
+            return "L2 의료 최종 답변"
+
+        async def answer(self, messages):
+            del messages
+            raise AssertionError("retrieval path must not run without MCP")
+
+    l2 = FakeL2()
+    generation = DirectGeneration()
+    messages = [ChatMessage(role="user", content="질문")]
+    orchestrator = ChatOrchestrator(
+        l2_client=l2,
+        generation_engine=generation,
+        mode="direct",
+    )
+
+    assert await orchestrator.answer(messages) == "L2 의료 최종 답변"
+    assert generation.calls == [messages]
+    assert l2.calls == []
+    assert orchestrator.last_usage.total_tokens == 8
+
+
 async def test_retrieval_failure_falls_back_to_medical_l2_generation():
     class FailingGeneration:
         def __init__(self):
