@@ -24,14 +24,6 @@ class ChatMessage(BaseModel):
     tool_calls: list[ToolCall] | None = None
 
 
-class ChatCompletionRequest(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    model: str
-    messages: list[ChatMessage] = Field(min_length=1)
-    stream: bool = False
-
-
 class TokenUsage(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -41,32 +33,16 @@ class TokenUsage(BaseModel):
 class L2Completion(BaseModel):
     content: str | None = None
     tool_calls: list[ToolCall] = Field(default_factory=list)
-    usage: TokenUsage = Field(default_factory=TokenUsage)
-
-
-class ChatCompletionChoice(BaseModel):
-    index: int
-    message: ChatMessage
-    finish_reason: str | None
-
-
-class ChatCompletionResponse(BaseModel):
-    id: str
-    object: Literal["chat.completion"] = "chat.completion"
-    created: int
-    model: str
-    choices: list[ChatCompletionChoice]
+    finish_reason: str | None = None
     usage: TokenUsage = Field(default_factory=TokenUsage)
 
 
 class MCPTool(BaseModel):
-    """A transport-independent description of an MCP tool."""
-
     name: str
-    description: str
+    description: str = ""
     input_schema: dict[str, Any]
 
-    def as_openai_tool(self) -> dict[str, Any]:
+    def as_chat_tool(self) -> dict[str, Any]:
         return {
             "type": "function",
             "function": {
@@ -78,16 +54,16 @@ class MCPTool(BaseModel):
 
 
 class MCPCallResult(BaseModel):
-    """A stable, bounded representation of an MCP tool invocation result."""
-
     content: str
     is_error: bool = False
+    cite_uids: list[str] = Field(default_factory=list)
+    citation_contents: dict[str, str] = Field(default_factory=dict)
 
 
 class EvidenceItem(BaseModel):
     cite_uid: str
-    relevance_score: float = Field(ge=0.0, le=1.0)
     source_tool: str
+    relevance_score: float = Field(ge=0.0, le=1.0)
     content: str
 
 
@@ -95,3 +71,38 @@ class RetrievalResult(BaseModel):
     status: Literal["sufficient", "partial", "no_evidence"]
     items: list[EvidenceItem] = Field(default_factory=list)
     note: str = ""
+
+
+class ChatCompletionRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    model: str | None = None
+    messages: list[ChatMessage] = Field(min_length=1)
+    max_tokens: int | None = Field(default=None, ge=1)
+    stream: bool = False
+
+
+class ChatCompletionChoice(BaseModel):
+    index: int
+    message: ChatMessage
+    finish_reason: str | None = None
+
+
+class ChatCompletionResponse(BaseModel):
+    id: str
+    object: Literal["chat.completion"] = "chat.completion"
+    created: int
+    model: str
+    choices: list[ChatCompletionChoice]
+    usage: TokenUsage = Field(default_factory=TokenUsage)
+
+
+class ModelCard(BaseModel):
+    id: str
+    object: Literal["model"] = "model"
+    owned_by: str
+
+
+class ModelList(BaseModel):
+    object: Literal["list"] = "list"
+    data: list[ModelCard]

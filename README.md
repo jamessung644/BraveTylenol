@@ -1,89 +1,52 @@
-# BraveTylenol L2 MCP baseline
+# BraveTylenol no-timeout Korean baseline
 
-OpenAI-compatible submission service for the Lunit Foundation Model hackathon.
-`/v1/chat/completions` sends the final answer from the L2 model; this service
-does not synthesize a substitute final answer. In `rag` mode it lets L2 use
-the contest MCP service for retrieval before producing that final answer.
+이 브랜치는 점수보다 실행 안정성을 우선하는 비상용 기준선입니다. 영어로 된
+HealthBench 입력을 포함해 어떤 채팅 요청이 들어와도 외부 API, Lunit L2, MCP,
+검색, 재시도를 호출하지 않고 고정된 한국어 응답을 즉시 반환합니다.
 
-## Configuration
+## 평가 환경 계약
 
-Set the contest credential only in the runtime environment. Do not commit it,
-bake it into an image, or pass it as a Docker build argument.
+- 저장소 루트의 Dockerfile로 실행
+- 0.0.0.0:8000에서 수신
+- GET /health, GET /healthz
+- GET /v1/models
+- POST /v1/chat/completions
+- model 생략, 임의 추가 필드, stream=true, 빈 본문, 잘못된 JSON도 채팅
+  엔드포인트에서는 HTTP 200의 일반 JSON completion으로 처리
+- API 키와 Authorization 헤더가 없어도 실행
+- Python 표준 라이브러리만 사용하며 빌드 중 pip install 없음
 
-| Variable | Required | Default | Purpose |
-| --- | --- | --- | --- |
-| `LUNIT_FM_API_KEY` | Yes for chat | none | Contest L2 API credential. `/v1/models` works without it; chat returns 503. |
-| `LUNIT_FM_API_URL` | No | `https://model.hackathon.lunit.io` | L2 API base URL. |
-| `LUNIT_FM_MODEL` | No | `Lunit/L2-preview` | L2 model identifier. |
-| `LUNIT_MCP_URL` | No | `https://mcp.hackathon.lunit.io/mcp` | Contest MCP endpoint used in `rag` mode. |
-| `HARNESS_MODE` | No | `rag` | `rag` enables MCP retrieval; `passthrough` calls L2 directly. |
-| `MAX_TOOL_CALLS` | No | `4` | Maximum MCP tool-call rounds in RAG mode. |
-| `UPSTREAM_TIMEOUT_SECONDS` | No | `150` | Deadline for the complete chat request (including RAG), in seconds. |
-| `MAX_TOOL_RESULT_CHARS` | No | `12000` | Per-tool-result truncation limit. |
-| `MAX_EVIDENCE_CHARS` | No | `32000` | Total retrieved-evidence truncation limit. |
+## 실행
 
-## Local development
+~~~bash
+python main.py serve
+~~~
 
-Python 3.13 is the target runtime.
-
-```bash
-python3.13 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt -r requirements-dev.txt
-.venv/bin/pytest -q
-.venv/bin/ruff check app.py harness tests
-.venv/bin/python -m compileall -q app.py harness
-test -n "$LUNIT_FM_API_KEY" && .venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000
-```
-
-## Docker
-
-Build the minimal Python 3.13 runtime image, then inject the credential only
-when starting the container:
-
-```bash
-docker build -t brave-tylenol:baseline .
-docker run --rm -p 8000:8000 \
-  -e LUNIT_FM_API_KEY \
-  -e HARNESS_MODE=rag \
-  brave-tylenol:baseline
-```
-
-The image listens on port 8000 and starts `uvicorn app:app --host 0.0.0.0 --port 8000`.
-
-## API examples
-
-Readiness and model discovery do not require the contest credential:
-
-```bash
-curl --fail --silent http://127.0.0.1:8000/v1/models
-```
-
-Call the OpenAI-compatible chat endpoint after starting with the runtime key:
-
-```bash
-curl --fail --silent http://127.0.0.1:8000/v1/chat/completions \
+~~~bash
+curl --max-time 2 http://127.0.0.1:8000/health
+curl --max-time 2 http://127.0.0.1:8000/v1/models
+curl --max-time 2 \
   -H 'Content-Type: application/json' \
-  -d '{"model":"team-chatbot","messages":[{"role":"user","content":"안녕하세요"}]}'
-```
+  -d '{"messages":[{"role":"user","content":"What should I do?"}]}' \
+  http://127.0.0.1:8000/v1/chat/completions
+~~~
 
-### Mode comparison
+## 테스트
 
-- `HARNESS_MODE=rag` (default): the orchestrator allows L2 to retrieve
-  relevant contest data through MCP, then returns L2's final answer.
-- `HARNESS_MODE=passthrough`: no MCP retrieval client is constructed; the
-  original chat messages go straight to L2, whose final answer is returned.
+~~~bash
+python -m unittest discover -s tests -p 'test_baseline_server.py' -v
+~~~
 
-## Submission and live checks
+Docker가 있는 환경에서는 다음처럼 네트워크를 끊고 확인할 수 있습니다.
 
-Prepare the final submission on the exact branch `lunit/hackathon-submission`.
-The following checks require a valid contest API credential and therefore are
-not part of the credential-free deterministic suite:
+~~~bash
+docker build -t brave-tylenol-baseline .
+docker run --rm --network=none -p 8000:8000 brave-tylenol-baseline
+~~~
 
-1. Ensure `$LUNIT_FM_API_KEY` is set, then start the container as above.
-2. Run the chat request above and confirm a successful L2-backed completion.
-3. Run the hackathon's CoEval command or dashboard evaluation against
-   `http://127.0.0.1:8000/v1/chat/completions` (or the deployed equivalent)
-   using the contest-provided credential and evaluator settings.
+## 중요한 제한
 
-For a credential-free runtime smoke check, start the container without the
-key: `/v1/models` must return 200, while a chat request must return 503.
+대회 문서의 공식 규칙은 최종 답변을 Lunit/L2-preview가 생성하도록 요구합니다.
+이 브랜치는 그 규칙을 의도적으로 충족하지 않는 정적 0점 기준선이며, API 기동과
+응답 형식만 보장하기 위한 비상용입니다. 해당 규칙을 지켜 점수를 얻으려면 기존
+L2 기반 제출 브랜치를 사용해야 합니다.
