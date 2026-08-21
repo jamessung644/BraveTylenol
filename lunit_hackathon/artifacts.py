@@ -160,8 +160,8 @@ def load_runtime_artifacts(path: Path | str | None = None) -> RuntimeArtifacts:
     bundle = _expect_object(value, "artifact")
     if bundle.get("schema_version") != ARTIFACT_SCHEMA_VERSION:
         raise RuntimeArtifactError("unsupported runtime artifact schema")
-    if bundle.get("default_agent_mode") != "direct":
-        raise RuntimeArtifactError("runtime artifact default agent mode must be direct")
+    if bundle.get("default_agent_mode") != "hybrid":
+        raise RuntimeArtifactError("runtime artifact default agent mode must be hybrid")
 
     prompts = _expect_object(bundle.get("prompts"), "prompts")
     generation = _expect_object(prompts.get("generation"), "prompts.generation")

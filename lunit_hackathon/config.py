@@ -69,7 +69,7 @@ class Settings(BaseSettings):
         validation_alias="LUNIT_REASONING_EFFORT",
     )
     agent_mode: Literal["direct", "hybrid", "rag", "passthrough"] = Field(
-        default="direct",
+        default="hybrid",
         validation_alias=AliasChoices("AGENT_MODE", "HARNESS_MODE"),
     )
     mcp_url: str | None = Field(

@@ -54,7 +54,7 @@ def test_latency_controls_have_safe_defaults(monkeypatch):
     assert settings.max_completion_tokens == 4096
     assert settings.reasoning_effort == "low"
     assert settings.retry_attempts == 0
-    assert settings.agent_mode == "direct"
+    assert settings.agent_mode == "hybrid"
 
 
 def test_release_configuration_rejects_transport_retries(monkeypatch):
@@ -64,14 +64,14 @@ def test_release_configuration_rejects_transport_retries(monkeypatch):
         Settings(_env_file=None)
 
 
-def test_container_defaults_to_direct_mode_with_bounded_hybrid_opt_in(monkeypatch):
+def test_container_defaults_to_bounded_hybrid_mode(monkeypatch):
     monkeypatch.delenv("AGENT_MODE", raising=False)
     monkeypatch.delenv("HARNESS_MODE", raising=False)
     monkeypatch.delenv("LUNIT_MCP_URL", raising=False)
 
     settings = Settings(_env_file=None)
 
-    assert settings.agent_mode == "direct"
+    assert settings.agent_mode == "hybrid"
     assert settings.mcp_url == "https://mcp.hackathon.lunit.io/mcp"
     assert settings.max_mcp_calls == 1
     assert settings.max_concurrent_rag_requests == 4

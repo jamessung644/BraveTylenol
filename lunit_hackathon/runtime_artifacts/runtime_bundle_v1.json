@@ -1,7 +1,7 @@
 {
-  "artifact_revision": "2026-08-22-dashboard-v1-natural-language-v1-direct-default-mcp3",
+  "artifact_revision": "2026-08-22-dashboard-v1-natural-language-v1-hybrid-default-mcp3",
   "dashboard_verified_date": "2026-08-21",
-  "default_agent_mode": "direct",
+  "default_agent_mode": "hybrid",
   "feature_flags": {
     "dashboard_v1_finalizer": true,
     "rich_v2": false
@@ -389,7 +389,7 @@
     },
     "14_LUNIT_RUNTIME_APPLICATION_BLUEPRINT.md": {
       "path": "docs/model-instructions/14_LUNIT_RUNTIME_APPLICATION_BLUEPRINT.md",
-      "sha256": "532c8ae23d206648e5458d6800a0d6108344d1a7ebf6d00b310a238a8d3d7580"
+      "sha256": "d938a370822647d0da81860acfa078e18988a4026de37e70de2ef368f703b09e"
     },
     "20_GENERATION_PROMPT.md": {
       "path": "docs/model-instructions/20_GENERATION_PROMPT.md",
@@ -413,7 +413,7 @@
     },
     "runtime_sources/release_config_v1.json": {
       "path": "runtime_sources/release_config_v1.json",
-      "sha256": "986020b6a3d096be0bb19db491f4aa37800ed1d46ab1f6a79a9a85128b4c1437"
+      "sha256": "902c89204c9a2a1ec3ac32f32c93885e3604105c6332cbeb610fdfc95d73aaa5"
     }
   }
 }

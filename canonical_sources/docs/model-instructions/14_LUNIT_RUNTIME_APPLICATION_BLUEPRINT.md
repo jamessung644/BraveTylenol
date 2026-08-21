@@ -170,7 +170,7 @@ Dashboard 규칙상 Model·MCP·Patient Simulator 등 Lunit asset은 Lunit netwo
 `BraveTylenol`은 `/mcp`를 제공하는 MCP 서버가 아니라 원격 Lunit MCP를 호출하는 client/orchestrator다. 현재 snapshot은 canonical source에서 컴파일한 runtime artifact를 submission runtime에 연결한 상태다.
 
 - Runtime은 hash-verified bundle의 여섯 Generation phase artifact와 Retrieval artifact를 import하며 startup에서 manifest와 byte hash를 검증한다. 다섯 final artifact에는 local function 2개와 등록된 MCP alias 21개 및 function/tool protocol 표면형이 없어야 한다.
-- 제출 runtime의 기본 mode는 direct이며 MCP를 호출하지 않는다. 명시적으로 활성화한 hybrid route만 source-dependent 질문을 내부 `tool_decision`과 bounded Retrieval로 보내고, 최종 답변은 phase별 fresh no-tool L2 request에서 생성한다.
+- 제출 runtime의 기본 mode는 hybrid다. 일반·비근거 의존 질문은 direct final fast path로 답하고, source-dependent 질문만 내부 `tool_decision`과 bounded Retrieval로 보낸다. 최종 답변은 어느 분기에서도 phase별 fresh no-tool L2 request가 생성하며 `AGENT_MODE=direct`는 MCP를 끄는 명시적 비교·복구 variant다.
 - 승인 alias allowlist, per-tool raw/wrapper schema와 projection, observed-`cite_uid` ledger, `retrieval-evidence-v4` adapter, MCP-aware readiness를 코드와 offline contract test로 검증한다.
 - 실제 L2/MCP endpoint 호환성과 품질은 별도 Lunit-network canary·E2E trial로 확인해야 하며, offline mock 통과만으로 live 검증을 주장하지 않는다.
 

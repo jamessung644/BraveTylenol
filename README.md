@@ -1,8 +1,8 @@
-# BraveTylenol direct-default L2 submission with opt-in MCP
+# BraveTylenol hybrid-default L2 + MCP submission
 
 `baseline/024-hybrid`의 동시성·지연시간 대조군을 바탕으로, 환경 설정이 없는 제출
-Docker에서는 Lunit L2를 한 번만 호출하는 direct 경로를 사용한다. 공식 MCP Retrieval을
-사용하는 hybrid/RAG 경로는 `AGENT_MODE`로 명시적으로 활성화한다. 실제 Docker image는
+Docker에서는 고정밀 hybrid routing을 사용한다. 일반 질문은 Lunit L2 direct fast path로
+답하고, 근거 의존성이 명확한 질문만 공식 MCP Retrieval로 보낸다. 실제 Docker image는
 `main.py`가 아니라 FastAPI `app.py`를 `uvicorn`으로
 실행한다. `main.py`는 이전 direct-only 대조군을 재현하기 위한 저장소 파일이며 image에
 포함되지 않는다.
@@ -44,22 +44,22 @@ content part, `max_completion_tokens`와 무해한 metadata/sampling field를 �
 context로 downgrade된다. Client가 보낸 tool/function protocol field와 tool message는 계속
 400으로 거절한다.
 
-## 기본 direct 라우팅과 opt-in hybrid
+## 기본 hybrid 라우팅과 direct override
 
-| 입력 유형 | direct 기본 경로 | hybrid opt-in 경로 |
+| 입력 유형 | hybrid 기본 경로 | direct override |
 | --- | --- | --- |
 | 일반 증상, 생활습관, 안정적인 건강 상식 | direct L2 1회 | 동일 |
 | 의식 저하·호흡 곤란·흉통·과량복용 등 응급 표현 | emergency L2 1회 | 검색 없이 동일 |
-| KCD/상병코드, MFDS 허가, HIRA 급여·약가·수가, 대한민국 법령 | direct L2 1회 | MCP/RAG 후보 |
-| 최신 지침·논문·연구 또는 명시적인 근거·출처·인용 요청 | direct L2 1회 | MCP/RAG 후보 |
+| KCD/상병코드, MFDS 허가, HIRA 급여·약가·수가, 대한민국 법령 | MCP/RAG 후보 | direct L2 1회 |
+| 최신 지침·논문·연구 또는 명시적인 근거·출처·인용 요청 | MCP/RAG 후보 | direct L2 1회 |
 
 `hybrid`는 direct가 기본인 고정밀 routing이다. “최신”, “현재”, “출처” 같은 넓은 단어
 하나만으로 RAG를 강제하지 않으며 실제 근거 요청이나 승인된 행정·법률 영역과 결합된 경우에
 선택한다. 최근 두 사용자 turn만 routing 판단에 사용해 짧은 대명사 연결은 보존하면서 오래된
 대화의 키워드가 현재 질문을 불필요하게 RAG로 보내지 않게 한다.
 
-기본값은 `AGENT_MODE=direct`이며 MCP endpoint를 호출하지 않는다. `AGENT_MODE=hybrid`는
-위 source-dependent routing을 활성화한다. Hybrid와 forced RAG 모두 admission 4개가 이미
+기본값은 `AGENT_MODE=hybrid`이며 위 source-dependent routing을 활성화한다.
+`AGENT_MODE=direct`는 MCP를 완전히 끄는 비교·복구 variant다. Hybrid와 forced RAG 모두 admission 4개가 이미
 사용 중이면 대기열에서 최종 답변 시간을 소모하지 않는다. source-dependent 요청은 fresh
 `mcp_failure_final`로, 그 밖의 요청은 direct L2로 전환한다. `AGENT_MODE=rag`는 모든 정상
 질문에 Retrieval 도구를 노출하는 진단용, `AGENT_MODE=passthrough`는 검색 조정 없이 안전
@@ -204,5 +204,6 @@ HealthBench 점수가 아니다.
 고정 synthetic 의료 질문의 실제 L2/MCP 비교 결과다. 유효 retrieval 6쌍에서 hybrid가
 32점, direct가 34점이었고 평균 지연은 각각 41.5초와 20.2초였다. 별도 응급·특이 13쌍은
 총점이 102 대 101이었지만 assistant-history topic-switch 안전성 회귀가 있어 전체 gate를
-통과하지 못했다. 따라서 이 commit은 fast direct를 기본으로 유지하고 hybrid/RAG를 명시적
-진단·실험 opt-in으로만 보존한다.
+통과하지 못했다. 실험 자체의 promotion 판정은 NO-GO였지만, 최종 제출 지시에 따라 이 후속
+commit은 hybrid를 기본값으로 선택한다. 안전한 call budget과 direct fast path는 그대로
+유지하며 `AGENT_MODE=direct`로 즉시 MCP를 끌 수 있다.

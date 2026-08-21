@@ -61,7 +61,7 @@ def test_committed_bundle_exactly_matches_fresh_canonical_compile():
     result = _run_compiler("--source-root", str(SOURCE_ROOT), "--check")
 
     assert result.returncode == 0, result.stderr
-    assert load_runtime_artifacts().bundle["default_agent_mode"] == "direct"
+    assert load_runtime_artifacts().bundle["default_agent_mode"] == "hybrid"
 
 
 def test_compiler_is_byte_deterministic(tmp_path):
