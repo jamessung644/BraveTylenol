@@ -87,7 +87,12 @@ class EvidenceItem(BaseModel):
     cite_uid: str
     source_tool: str
     relevance_score: float = Field(ge=0.0, le=1.0)
+    authority_rank: int = Field(default=0, ge=0, le=5)
     content: str
+    title: str | None = None
+    url: str | None = None
+    jurisdiction: str | None = None
+    effective_date: str | None = None
 
 
 class RetrievalResult(BaseModel):
