@@ -121,6 +121,23 @@ def test_stage_budget_values_must_be_positive_and_bounded(monkeypatch, environme
         Settings(_env_file=None)
 
 
+@pytest.mark.parametrize(
+    ("environment_name", "value"),
+    [
+        ("REQUEST_TIMEOUT_SECONDS", "165.1"),
+        ("MAX_MCP_CALLS", "7"),
+        ("MAX_EVIDENCE_CHARS", "24001"),
+    ],
+)
+def test_hard_evaluator_limits_reject_environment_values_above_the_cap(
+    monkeypatch, environment_name, value
+):
+    monkeypatch.setenv(environment_name, value)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
 def test_legacy_baseline_environment_names_remain_supported(monkeypatch):
     for name in (
         "REQUEST_TIMEOUT_SECONDS",
