@@ -1,52 +1,79 @@
-# BraveTylenol no-timeout Korean baseline
+# Brave Tylenol — Lunit L2 Medical Chat
 
-이 브랜치는 점수보다 실행 안정성을 우선하는 비상용 기준선입니다. 영어로 된
-HealthBench 입력을 포함해 어떤 채팅 요청이 들어와도 외부 API, Lunit L2, MCP,
-검색, 재시도를 호출하지 않고 고정된 한국어 응답을 즉시 반환합니다.
+Conquer Health 제출용 OpenAI 호환 의료 대화 서비스다. 기본 경로는 의료 안전
+프롬프트와 전체 대화 이력을 `Lunit/L2-preview`에 전달해 L2가 생성한 답변을
+반환한다. 고정 답변이나 외부 모델은 사용하지 않는다.
 
-## 평가 환경 계약
+## 평가 API
 
-- 저장소 루트의 Dockerfile로 실행
-- 0.0.0.0:8000에서 수신
-- GET /health, GET /healthz
-- GET /v1/models
-- POST /v1/chat/completions
-- model 생략, 임의 추가 필드, stream=true, 빈 본문, 잘못된 JSON도 채팅
-  엔드포인트에서는 HTTP 200의 일반 JSON completion으로 처리
-- API 키와 Authorization 헤더가 없어도 실행
-- Python 표준 라이브러리만 사용하며 빌드 중 pip install 없음
+- `GET /health`, `GET /healthz`
+- `GET /v1/models` (`team-chatbot`)
+- `POST /v1/chat/completions`
+- 요청 `model` 생략 가능
+- 비스트리밍 OpenAI Chat Completions 응답
+- 평가 요청의 `Authorization: Bearer ...`를 요청 범위 L2 인증으로 전달
+- 멀티턴 `messages` 이력을 그대로 보존
 
-## 실행
+## CoEval 기본 동작
 
-~~~bash
-python main.py serve
-~~~
+공식 `conquer_val` 설정은 약 301개 문항을 동시성 16으로 실행하고, 추론 실패를
+한 번 재시도하며, L2의 reasoning과 최종 답변을 위해 `max_tokens=6144`를 요청한다.
+이에 맞춘 제출 기본값은 다음과 같다.
 
-~~~bash
-curl --max-time 2 http://127.0.0.1:8000/health
-curl --max-time 2 http://127.0.0.1:8000/v1/models
-curl --max-time 2 \
-  -H 'Content-Type: application/json' \
-  -d '{"messages":[{"role":"user","content":"What should I do?"}]}' \
-  http://127.0.0.1:8000/v1/chat/completions
-~~~
+| 변수 | 기본값 | 설명 |
+| --- | --- | --- |
+| `LUNIT_FM_API_URL` | `https://model.hackathon.lunit.io` | L2 base URL |
+| `LUNIT_FM_MODEL` | `Lunit/L2-preview` | 최종 답변 모델 |
+| `AGENT_MODE` | `direct` | 평가 기본 경로: L2 1회 직접 생성 |
+| `REQUEST_TIMEOUT_SECONDS` | `65` | 요청 전체 제한 |
+| `MAX_COMPLETION_TOKENS` | `6144` | CoEval 요청을 자르지 않는 L2 토큰 상한 |
+| `L2_RETRY_ATTEMPTS` | `0` | CoEval 재시도와 중첩되는 내부 HTTP 재시도 방지 |
+| `LUNIT_REASONING_EFFORT` | `low` | 지연을 줄이는 추론 수준 |
 
-## 테스트
+`AGENT_MODE=rag`와 `LUNIT_MCP_URL`을 함께 설정하면 공식 MCP 기반 검색 경로를
+사용할 수 있다. 평가 컨테이너에 MCP 주소가 없는 기본 제출에서는 direct 경로가
+사용되어 요청당 정상 L2 호출은 한 번이다.
 
-~~~bash
-python -m unittest discover -s tests -p 'test_baseline_server.py' -v
-~~~
+## 로컬 실행
 
-Docker가 있는 환경에서는 다음처럼 네트워크를 끊고 확인할 수 있습니다.
+Python 3.12 또는 3.13 환경에서:
 
-~~~bash
-docker build -t brave-tylenol-baseline .
-docker run --rm --network=none -p 8000:8000 brave-tylenol-baseline
-~~~
+```bash
+python -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt
+cp .env.example .env
+.venv/bin/python main.py serve
+```
 
-## 중요한 제한
+L2 연결만 확인하려면:
 
-대회 문서의 공식 규칙은 최종 답변을 Lunit/L2-preview가 생성하도록 요구합니다.
-이 브랜치는 그 규칙을 의도적으로 충족하지 않는 정적 0점 기준선이며, API 기동과
-응답 형식만 보장하기 위한 비상용입니다. 해당 규칙을 지켜 점수를 얻으려면 기존
-L2 기반 제출 브랜치를 사용해야 합니다.
+```bash
+.venv/bin/python main.py check-l2
+```
+
+## 검증
+
+```bash
+.venv/bin/python -m pytest -q
+.venv/bin/python -m ruff check .
+.venv/bin/python -m compileall -q app.py main.py lunit_hackathon
+.venv/bin/python -m pip check
+```
+
+## Docker 제출
+
+```bash
+docker build -t brave-tylenol:lunit .
+docker run --rm -p 8000:8000 brave-tylenol:lunit
+```
+
+이미지는 비루트 사용자로 실행되며 API 키를 이미지에 포함하지 않는다. CoEval은
+각 요청의 Bearer 키를 전달하므로 평가 컨테이너에 `.env`가 없어도 `/health`,
+`/v1/models` 및 채팅 경로가 정상 기동한다.
+
+## 보안 및 격리
+
+- 실제 API 키, 대시보드 계정, 의료 대화 내용을 저장하거나 로그에 남기지 않는다.
+- `.env`, 테스트, 캐시 및 개발 문서는 Docker 이미지에 포함하지 않는다.
+- 런타임 외부 호출은 Lunit L2와 명시적으로 설정된 공식 MCP로 제한한다.
+- HealthBench 문항이나 답변을 하드코딩하지 않는다.

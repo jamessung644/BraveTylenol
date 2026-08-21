@@ -47,9 +47,14 @@ def test_latency_controls_have_safe_defaults(monkeypatch):
     settings = Settings(_env_file=None)
 
     assert settings.request_timeout_seconds == 65
-    assert settings.max_completion_tokens == 1024
+    # CoEval's Conquer Health profile requests 6,144 tokens because L2's
+    # reasoning consumes the same budget.  Capping this below the evaluator's
+    # budget can produce an empty completion and multiply retries.
+    assert settings.max_completion_tokens == 6144
     assert settings.reasoning_effort == "low"
-    assert settings.retry_attempts == 1
+    # CoEval already retries each inference request once.  The submission must
+    # not amplify that into nested upstream retries under 16-way concurrency.
+    assert settings.retry_attempts == 0
     assert settings.agent_mode == "direct"
 
 
