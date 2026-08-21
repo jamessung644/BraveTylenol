@@ -32,5 +32,31 @@
 PASS. The run met the local gate of at least 15 real L2 responses, at most one
 fallback, no HTTP or empty-response errors, and maximum latency below 35 seconds.
 
-This is an integration and latency gate, not an official HealthBench score. It
-depends on a valid Lunit credential being supplied to the container at runtime.
+This is an integration and latency gate, not an official HealthBench score. In
+this first run, the valid Lunit credential was supplied at container runtime.
+
+## Embedded-key evaluator simulation
+
+After the organizers explicitly permitted embedding the team credential, the
+image was rebuilt and started without an env file and without
+`LUNIT_FM_API_KEY`. Every request carried only a non-Lunit evaluator placeholder
+Bearer token.
+
+| Metric | Result |
+| --- | ---: |
+| Requests | 16 |
+| HTTP 200 | 16 |
+| Real L2 responses | 15 |
+| Static fallbacks | 1 |
+| Empty responses | 0 |
+| Request errors | 0 |
+| Wall time | 31.168 s |
+| Minimum latency | 21.473 s |
+| Median latency | 24.307 s |
+| Maximum latency | 31.164 s |
+| `LUNIT_FM_API_KEY` present in container env | false |
+| Container OOM killed | false |
+| Container restarts | 0 |
+
+PASS. This confirms the container can reach L2 when the dashboard does not
+inject an API-key environment variable or forward a usable Lunit Bearer.
