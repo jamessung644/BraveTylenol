@@ -18,7 +18,7 @@ bake it into an image, or pass it as a Docker build argument.
 | `LUNIT_MCP_URL` | No | `https://mcp.hackathon.lunit.io/mcp` | Contest MCP endpoint used in `rag` mode. |
 | `HARNESS_MODE` | No | `rag` | `rag` enables MCP retrieval; `passthrough` calls L2 directly. |
 | `MAX_TOOL_CALLS` | No | `4` | Maximum MCP tool-call rounds in RAG mode. |
-| `UPSTREAM_TIMEOUT_SECONDS` | No | `150` | L2 request timeout, in seconds. |
+| `UPSTREAM_TIMEOUT_SECONDS` | No | `150` | Deadline for the complete chat request (including RAG), in seconds. |
 | `MAX_TOOL_RESULT_CHARS` | No | `12000` | Per-tool-result truncation limit. |
 | `MAX_EVIDENCE_CHARS` | No | `32000` | Total retrieved-evidence truncation limit. |
 

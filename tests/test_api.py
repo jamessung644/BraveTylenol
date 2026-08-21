@@ -1,3 +1,4 @@
+import asyncio
 import time
 
 import pytest
@@ -143,6 +144,29 @@ async def test_l2_timeout_maps_to_gateway_timeout(settings_with_key):
 
     assert response.status_code == 504
     assert response.json() == {"detail": "L2 upstream timed out"}
+
+
+async def test_request_deadline_cancels_orchestration_and_maps_to_gateway_timeout(settings_with_key):
+    class SlowOrchestrator:
+        def __init__(self):
+            self.cancelled = False
+
+        async def answer(self, messages):
+            del messages
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+
+    slow = SlowOrchestrator()
+    app = create_app(settings=settings_with_key.model_copy(update={"upstream_timeout_seconds": 0.01}), orchestrator=slow)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/v1/chat/completions", json={"model": "team-chatbot", "messages": [{"role": "user", "content": "안녕"}]})
+
+    assert response.status_code == 504
+    assert response.json() == {"detail": "L2 upstream timed out"}
+    assert slow.cancelled
 
 
 async def test_l2_failure_maps_to_bad_gateway(settings_with_key):

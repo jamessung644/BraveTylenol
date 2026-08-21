@@ -1,3 +1,4 @@
+import asyncio
 import time
 import uuid
 from collections.abc import Sequence
@@ -78,7 +79,10 @@ def create_app(
             raise HTTPException(status_code=503, detail="LUNIT_FM_API_KEY is not configured")
         try:
             active_orchestrator = resolved_orchestrator or build_orchestrator()
-            answer = await active_orchestrator.answer(request.messages)
+            async with asyncio.timeout(resolved_settings.upstream_timeout_seconds):
+                answer = await active_orchestrator.answer(request.messages)
+        except TimeoutError as error:
+            raise HTTPException(status_code=504, detail="L2 upstream timed out") from error
         except ConfigurationError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
         except UpstreamTimeoutError as error:
