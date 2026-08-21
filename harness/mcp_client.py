@@ -89,21 +89,22 @@ class MCPClient:
         if not self._settings.api_key:
             raise ConfigurationError("LUNIT_FM_API_KEY is required for MCP requests")
 
-        connected = False
+        caller_error: BaseException | None = None
         try:
             async with self._http_client_factory(
                 headers={"Authorization": f"Bearer {self._settings.api_key}"},
                 timeout=httpx2.Timeout(self._settings.upstream_timeout_seconds),
                 follow_redirects=True,
-            ) as http_client:
-                transport = self._transport_factory(self._settings.mcp_url, http_client=http_client)
-                async with self._client_factory(transport) as client:
-                    connected = True
+            ) as http_client, self._transport_factory(self._settings.mcp_url, http_client=http_client) as transport, self._client_factory(transport) as client:
+                try:
                     yield SDKMCPConnection(client, self._settings.max_tool_result_chars)
-        except (ConfigurationError, RetrievalError):
-            raise
+                except BaseException as error:
+                    caller_error = error
+                    raise
         except Exception as error:
-            if connected:
+            if caller_error is not None:
+                raise caller_error
+            if isinstance(error, (ConfigurationError, RetrievalError)):
                 raise
             raise RetrievalError("MCP connection failed") from error
 

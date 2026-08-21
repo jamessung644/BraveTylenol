@@ -1,6 +1,9 @@
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
+import pytest
+
+from harness.errors import RetrievalError
 from harness.mcp_client import MCPClient, SDKMCPConnection
 from harness.schemas import MCPTool
 
@@ -69,7 +72,9 @@ async def test_mcp_client_connects_with_bearer_http_client_and_delegates(setting
 
     @asynccontextmanager
     async def transport_context():
+        events.append(("transport-enter",))
         yield "transport"
+        events.append(("transport-exit",))
 
     def fake_transport(url, *, http_client):
         events.append(("transport", url, http_client))
@@ -97,7 +102,60 @@ async def test_mcp_client_connects_with_bearer_http_client_and_delegates(setting
     assert events[0][1]["headers"] == {"Authorization": "Bearer test-key"}
     assert events[0][1]["follow_redirects"] is True
     assert events[1] == ("transport", settings_with_key.mcp_url, "http-client")
-    assert events[2][0] == "client"
+    assert events[2] == ("transport-enter",)
+    assert events[3] == ("client", "transport")
+    assert events[4] == ("transport-exit",)
+
+
+async def test_mcp_client_wraps_client_teardown_failure(settings_with_key):
+    @asynccontextmanager
+    async def fake_http_client(**kwargs):
+        yield "http-client"
+
+    @asynccontextmanager
+    async def fake_transport(url, *, http_client):
+        yield "transport"
+
+    @asynccontextmanager
+    async def failing_sdk_client(transport):
+        yield FakeSDKClient()
+        raise RuntimeError("teardown failed")
+
+    adapter = MCPClient(
+        settings_with_key,
+        http_client_factory=fake_http_client,
+        transport_factory=fake_transport,
+        client_factory=failing_sdk_client,
+    )
+
+    with pytest.raises(RetrievalError, match="MCP connection failed"):
+        async with adapter.connect():
+            pass
+
+
+async def test_mcp_client_preserves_caller_body_exception(settings_with_key):
+    @asynccontextmanager
+    async def fake_http_client(**kwargs):
+        yield "http-client"
+
+    @asynccontextmanager
+    async def fake_transport(url, *, http_client):
+        yield "transport"
+
+    @asynccontextmanager
+    async def fake_sdk_client(transport):
+        yield FakeSDKClient()
+
+    adapter = MCPClient(
+        settings_with_key,
+        http_client_factory=fake_http_client,
+        transport_factory=fake_transport,
+        client_factory=fake_sdk_client,
+    )
+
+    with pytest.raises(ValueError, match="caller failure"):
+        async with adapter.connect():
+            raise ValueError("caller failure")
 
 
 class FakeSDKClient:
