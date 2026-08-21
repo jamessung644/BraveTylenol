@@ -1,129 +1,82 @@
 # Architecture
 
-이 문서는 사용자가 제공한 Lunit 해커톤 핵심 규칙과 API 계약을 기준으로 한 제출 구조를
-설명한다. 대시보드 규칙 페이지는 개발 시점의 브라우저 실행 환경 오류로 자동 열람하지
-못했으므로, 제출 직전에 공식 페이지의 포트·타임아웃·MCP 주소를 다시 대조해야 한다.
+`team-chatbot` is an OpenAI-compatible medical chat service whose user-visible
+medical answers are generated and, where appropriate, checked only by official
+Lunit L2 (`Lunit/L2-preview`). The score-first path uses the official Lunit MCP
+endpoint; it does not use an OpenAI SDK, OpenAI judge credential, hidden
+HealthBench data, or an external answer grader.
 
-## 목표와 불변 조건
+## Request pipeline
 
-가장 중요한 불변 조건은 **사용자에게 반환되는 의료 답변의 모든 문장이 Lunit L2가 생성한
-텍스트여야 한다**는 것이다.
+```text
+POST /v1/chat/completions
+  -> request validation and one 165-second monotonic deadline
+  -> resolve the internal Lunit credential (never the evaluator placeholder)
+  -> deterministic multi-domain routing from the complete recent conversation
+  -> routed MCP retrieval in at most two parallel waves (at most six calls)
+  -> authority ranking, exact-duplicate removal, and 24,000-character bound
+  -> Lunit L2 grounded generation
+  -> selective Lunit L2 verification for high-risk routes when time remains
+  -> valid team-chatbot completion envelope
+```
 
-- Python 코드는 요청 검증, 도구 프로토콜, 근거 크기 제한, 오류 매핑만 수행한다.
-- 직접 답변은 L2 첫 생성 결과를 그대로 반환한다.
-- 검색 답변은 MCP 결과를 근거 데이터로 L2에 다시 전달하고 L2의 다음 생성 결과를 그대로
-  반환한다.
-- MCP 장애 시 Python이 답변을 대신 만들지 않고 의료 안전 프롬프트를 포함해 L2를 다시
-  호출한다.
-- HealthBench 문항이나 예상 답변을 식별하거나 하드코딩하지 않는다.
+The router combines all matching domains and exposes only their allowlisted MCP
+tools. Drug, safety, reimbursement, coding, law, emergency, and vulnerable-
+population signals can require verification. General health is the bounded
+fallback retrieval domain rather than permission to expose every discovered MCP
+tool. A self-contained query retains the latest user turn and up to four recent
+user/assistant turns in chronological order.
 
-## 요청 흐름
+## Time and failure control
 
-    POST /v1/chat/completions
-            |
-            v
-    입력 스키마 검증
-    (model 생략 허용, max_tokens를 서버 상한 이내로 제한)
-            |
-            v
-       실행 모드 선택
-            |
-            +-- direct(기본) --> L2 의료 생성 --> L2 텍스트 그대로 반환
-            |
-            +-- passthrough --> L2 전달 --> L2 텍스트 그대로 반환
-            |
-            +-- rag + MCP URL --> L2 검색 결정 --> retrieve_relevant_content(query)
-                                                        |
-                                                        v
-                                                 MCP 도구 동적 발견
-                                                        |
-                                                        v
-                                                 L2 검색 계획 및 도구 호출
-                                                        |
-                                                        v
-                                                 인용 선택·중복 제거·크기 제한
-                                                        |
-                                                        v
-                                                 근거를 L2에 전달
-                                                        |
-                                                        v
-                                                 L2 최종 텍스트 그대로 반환
+Every request receives one absolute 165-second `RequestDeadline`. Retrieval has
+a 75-second cap while preserving generation time; grounded generation has a
+60-second cap; verification runs only with at least 25 seconds remaining.
+Evidence is capped at 24,000 characters and MCP execution is capped at six calls
+across two waves.
 
-기본 컨테이너는 `AGENT_MODE=direct`이므로 MCP URL이 환경에 있어도 안전 프롬프트 기반 L2
-직접 호출을 사용한다. RAG는 `AGENT_MODE=rag`와 `LUNIT_MCP_URL`이 모두 있을 때만
-활성화된다. `AGENT_MODE=rag`인데 URL이 없으면 직접 생성으로 안전하게 폴백한다.
-`AGENT_MODE=passthrough`는 검색 조정 없이 동일한 안전 프롬프트를 적용하는 진단 모드다.
+Expected upstream failures follow a typed, fail-soft path:
 
-## 평가 API 계약
+1. A typed retrieval failure triggers one direct L2 attempt on the original
+   conversation.
+2. A grounded-generation failure triggers one direct L2 attempt only when at
+   least ten seconds remain.
+3. A verifier failure retains the grounded candidate.
+4. A failed or unavailable direct L2 call returns the static Korean medical
+   safety fallback in a normal HTTP 200 completion envelope.
 
-- `POST /v1/chat/completions`의 `model`은 생략할 수 있다.
-- 모델을 생략한 응답과 `GET /v1/models`에서 사용하는 평가용 모델 ID는
-  `team-chatbot`이다.
-- 선택적인 요청 `max_tokens`는 서버 상한을 늘리지 못한다. 기본 서버 상한은 1,024이며,
-  요청값이 더 작을 때만 해당 값으로 L2 호출을 제한한다.
-- 기본 재시도 횟수는 1회이므로 각 L2 단계의 429/502/503/504 응답에 대해 최초 호출을
-  포함해 최대 2회 시도한다. 연결과 connection-pool 대기는 각각 최대 5초이며, 모든 L2
-  단계·재시도·빈 응답 복구는 하나의 전체 요청 기한 안에서만 실행된다.
-- 응답의 `finish_reason`은 L2의 실제 종료 사유(`stop`, `length` 등)를 보존한다.
-- 스트리밍은 지원하지 않으며 `stream=true` 요청은 400으로 거절한다.
+Malformed evaluator requests and `stream=true` remain validation failures.
+Valid requests always return model `team-chatbot`, a nonblank assistant choice,
+`finish_reason="stop"`, and nonnegative usage fields.
 
-## 컴포넌트
+## Components
 
-| 파일 | 책임 |
+| Component | Responsibility |
 | --- | --- |
-| app.py | OpenAI 호환 HTTP 계약, 총 요청 기한, 오류 상태 변환 |
-| main.py | 서버 및 실 L2 연결 확인 CLI |
-| config.py | .env/환경 변수 검증과 비밀값 마스킹 |
-| l2_client.py | L2 Chat Completions 호출, 제한된 재시도, 응답 검증 |
-| generation.py | L2가 검색 필요성을 결정하고 최종 답변을 생성하도록 조정 |
-| mcp_client.py | MCP SDK 및 Streamable HTTP 전송을 애플리케이션에서 격리 |
-| retrieval.py | MCP 도구 스키마 검증, 호출 예산, 인용 선택, 근거 크기 제한 |
-| orchestrator.py | direct/RAG/passthrough 선택과 검색 장애 시 L2 폴백 |
-| prompts.py | 일반화된 의료 안전 및 검색 계획 지침 |
-| logging_config.py | 프롬프트·근거·자격 증명을 제외한 운영 로그 |
+| `app.py` | OpenAI-shaped HTTP contract, request-scoped construction, and envelope recovery |
+| `credentials.py` | Shared Lunit credential validation and resolution without logging values |
+| `deadline.py` | Monotonic request budget and stage reservations |
+| `routing.py` | Deterministic domains, allowlists, and bounded multi-turn retrieval query |
+| `retrieval.py` | MCP discovery, routed two-wave planning, typed errors, and evidence collection |
+| `evidence.py` | Source authority ranking, exact deduplication, citation filtering, and size bound |
+| `generation.py` | Direct and evidence-grounded L2 generation |
+| `verification.py` | High-risk L2 answer repair under the remaining request deadline |
+| `orchestrator.py` | Typed score-first routing and direct/static recovery order |
+| `scripts/concurrent_smoke.py` | Aggregate-only 16×16 public-envelope gate |
+| `scripts/paired_quality_check.py` | Fixed seven-scenario direct-versus-score answer capture outside Git |
+| `scripts/patient_simulator_smoke.py` | Five-conversation bounded official patient-simulator smoke gate |
 
-## 오류와 폴백
+## Runtime and privacy boundaries
 
-| 상황 | 동작 |
-| --- | --- |
-| API Key 없음 | 준비 상태는 200, 채팅은 503 |
-| L2 타임아웃 | 504 |
-| L2 전송/응답/형식 오류 | 세부정보를 숨긴 502 |
-| rag 모드에서 MCP URL 없음 또는 연결 실패 | 안전 프롬프트 기반 L2 직접 생성 |
-| 개별 MCP 도구 실패 | 검색 L2에 구조화된 오류 전달 |
-| 잘못된 도구 이름/인자 | 실행하지 않고 프로토콜 오류 전달 |
-| MCP 호출 예산 소진 | 수집된 근거를 partial로 L2에 전달 |
-| 스트리밍 요청 | 현재 계약에서는 400 |
+The container contains only the production application and dependencies, runs
+as a non-root user, and serves `0.0.0.0:8000`. The default score-first mode is
+`rag` with `https://mcp.hackathon.lunit.io/mcp`; `AGENT_MODE=direct` is retained
+for the reference comparison path.
 
-## 격리 평가 환경
-
-런타임 네트워크 대상은 다음 두 종류뿐이다.
-
-1. 필수 Lunit L2 endpoint (LUNIT_FM_API_URL)
-2. AGENT_MODE=rag와 LUNIT_MCP_URL을 모두 명시했을 때만 사용하는 대회 공식 MCP endpoint
-
-일반 웹 검색, 상용 검색 API, 클라우드 벡터 DB, 원격 분석 서비스, 외부 인증 서비스에는
-의존하지 않는다. MCP가 구성되지 않아도 L2-only 폴백으로 동작한다. 컨테이너에는 .env,
-테스트, 문서, 캐시를 복사하지 않는다.
-
-Python 패키지 설치는 이미지 빌드 단계에만 필요하다. 대회 빌드 환경까지 완전 오프라인이면
-운영자가 제공하는 패키지 미러 또는 사전 빌드 이미지 정책이 추가로 필요하므로 공식 제출
-문서와 확인해야 한다.
-
-## 보안과 개인정보
-
-- API Key와 대시보드 자격 증명은 .env 또는 런타임 환경에만 둔다.
-- .env와 모든 변형은 Git 및 Docker context에서 제외하고 .env.example만 허용한다.
-- SecretStr로 설정 객체 표현에서 비밀을 마스킹한다.
-- 요청 로그에는 생성된 request ID, 메서드, 경로, 상태, 시간, 오류 클래스만 기록한다.
-- 의료 질문, 대화, MCP 근거 본문, Authorization 헤더는 기록하거나 저장하지 않는다.
-- MCP 결과와 사용자 입력은 시스템 지시가 아닌 신뢰하지 않는 데이터로 취급한다.
-
-## 동시성과 자원 제한
-
-- 모든 L2/MCP I/O는 비동기다.
-- 요청별 오케스트레이터와 검색 상태를 사용해 대화 간 상태 누출을 막는다.
-- L2 HTTP 연결 풀만 FastAPI lifespan 동안 공유한다.
-- MCP 호출 횟수(실행당 최대 2회), 개별 도구 결과, 전체 근거 크기를 제한한다.
-- 선택적 검색은 전체 요청 제한의 45%(최대 45초)까지만 사용해 직접 L2 폴백 시간을 남긴다.
-- 영구 대화 저장이나 교차 요청 캐시는 사용하지 않는다.
+The Lunit credential is resolved internally and never placed in logs, smoke
+output, Docker build context, or version control. Authorization values, user
+messages, patient-simulator turns, generated answers, prompts, raw MCP evidence,
+raw response bodies, and raw exception bodies are not logged. Operational output
+is restricted to aggregate status, latency, fallback, and shape metrics. Paired
+answers are written only to a caller-selected path outside the repository (or a
+Git-ignored path), with restrictive file permissions.
