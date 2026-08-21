@@ -47,13 +47,13 @@ class Settings(BaseSettings):
         ),
     )
     retry_attempts: int = Field(
-        default=1,
+        default=0,
         ge=0,
         le=3,
         validation_alias="L2_RETRY_ATTEMPTS",
     )
     max_completion_tokens: int = Field(
-        default=1_024,
+        default=6_144,
         ge=512,
         le=6_144,
         validation_alias="MAX_COMPLETION_TOKENS",

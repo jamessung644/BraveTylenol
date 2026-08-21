@@ -145,7 +145,7 @@ async def test_chat_preserves_multi_turn_history_after_direct_system_prompt(monk
 
 @pytest.mark.parametrize(
     ("requested_max_tokens", "expected_max_tokens"),
-    [(700, 700), (5_000, 1_024)],
+    [(700, 700), (5_000, 5_000), (7_000, 6_144)],
 )
 async def test_chat_applies_requested_max_tokens_with_server_cap(
     monkeypatch,
