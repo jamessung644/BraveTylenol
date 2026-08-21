@@ -55,7 +55,7 @@ curl --max-time 160 \
   http://127.0.0.1:8000/v1/chat/completions
 ```
 
-## 테스트
+## Test
 
 ```bash
 python -m pytest -q
