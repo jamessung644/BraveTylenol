@@ -356,6 +356,13 @@ async def test_direct_answer_uses_medical_prompt_but_no_tools():
 
     assert answer == "안전한 직접 답변"
     assert l2.calls[0]["messages"][0]["role"] == "system"
-    assert "no more than 300 words" in l2.calls[0]["messages"][0]["content"]
+    prompt = l2.calls[0]["messages"][0]["content"]
+    assert "no more than 300 words" in prompt
+    assert "119 in Korea" in prompt
+    assert "Do not confirm or rule out an individual's diagnosis" in prompt
+    assert "Never issue or simulate a prescription" in prompt
+    assert "general health-information and wellness-support service" in prompt
+    assert "effective date" in prompt
+    assert "proxy for clinical need" in prompt
     assert l2.calls[0]["messages"][-1]["content"] == "질문"
     assert "tools" not in l2.calls[0]
