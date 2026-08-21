@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import multiprocessing
 import os
 import stat
 import sys
@@ -43,15 +44,25 @@ def _server(handler):
 
 class _DripHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    interval_seconds = 0.02
+    bytes_sent = 0
+    sent_multiple_bytes = threading.Event()
 
     def do_POST(self):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", "100000")
         self.end_headers()
-        self.wfile.write(b"{")
-        self.wfile.flush()
-        time.sleep(2.0)
+        for _ in range(500):
+            try:
+                self.wfile.write(b" ")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                return
+            type(self).bytes_sent += 1
+            if type(self).bytes_sent >= 3:
+                type(self).sent_multiple_bytes.set()
+            time.sleep(type(self).interval_seconds)
 
     def log_message(self, format, *args):
         return
@@ -212,9 +223,12 @@ def test_conversation_records_harness_latency_limit_violations():
     assert result.harness_latency_failures == 1
 
 
-def test_post_json_has_an_absolute_deadline_and_sanitizes_lone_surrogates():
-    """A drip peer or invalid request text must produce only a failed aggregate result."""
+def test_post_json_has_an_absolute_deadline_and_sanitizes_lone_surrogates(capfd):
+    """Continuous bytes cannot defeat the deadline and malformed text stays aggregate-only."""
     simulator = _load_simulator_module()
+    _DripHandler.bytes_sent = 0
+    _DripHandler.sent_multiple_bytes.clear()
+    prior_child_pids = {child.pid for child in multiprocessing.active_children()}
     server = _server(_DripHandler)
     started = time.perf_counter()
     try:
@@ -230,6 +244,13 @@ def test_post_json_has_an_absolute_deadline_and_sanitizes_lone_surrogates():
 
     assert (status, payload) == (0, None)
     assert time.perf_counter() - started < 1.0
+    assert _DripHandler.sent_multiple_bytes.is_set()
+    assert _DripHandler.bytes_sent >= 3
+    assert _DripHandler.interval_seconds < 0.2
+    assert all(child.pid in prior_child_pids for child in multiprocessing.active_children())
+    captured = capfd.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
     assert simulator._post_json("http://127.0.0.1:1", {"content": "\ud800"}, {}) == (0, None)
 
 
@@ -252,7 +273,7 @@ def test_key_file_rejects_symlink_and_oversized_content(tmp_path):
 
 
 def test_key_file_uses_one_descriptor_across_a_path_swap(monkeypatch, tmp_path):
-    """Reading the path after validation would accept attacker-replaced key material."""
+    """A replacement after open must not alter the descriptor being validated or read."""
     simulator = _load_simulator_module()
     key_file = tmp_path / "key"
     replacement = tmp_path / "replacement"
@@ -260,17 +281,41 @@ def test_key_file_uses_one_descriptor_across_a_path_swap(monkeypatch, tmp_path):
     replacement.write_text("replacement-key", encoding="utf-8")
     key_file.chmod(0o600)
     replacement.chmod(0o600)
-    original_stat = Path.stat
+    original_open = os.open
+    original_fstat = os.fstat
+    original_read = os.read
+    opened_descriptors: list[int] = []
+    fstat_descriptors: list[int] = []
+    read_descriptors: list[int] = []
+    swapped = False
 
-    def swap_after_stat(path, *args, **kwargs):
-        result = original_stat(path, *args, **kwargs)
-        if path == key_file:
+    def open_then_swap(path, flags, mode=0o777):
+        nonlocal swapped
+        descriptor = original_open(path, flags, mode)
+        opened_descriptors.append(descriptor)
+        if os.fspath(path) == os.fspath(key_file):
             os.replace(replacement, key_file)
-        return result
+            swapped = True
+        return descriptor
 
-    monkeypatch.setattr(Path, "stat", swap_after_stat)
+    def track_fstat(descriptor):
+        fstat_descriptors.append(descriptor)
+        return original_fstat(descriptor)
+
+    def track_read(descriptor, size):
+        read_descriptors.append(descriptor)
+        return original_read(descriptor, size)
+
+    monkeypatch.setattr(os, "open", open_then_swap)
+    monkeypatch.setattr(os, "fstat", track_fstat)
+    monkeypatch.setattr(os, "read", track_read)
 
     assert simulator.read_api_key_file(key_file) == "original-key"
+    assert swapped
+    assert len(opened_descriptors) == 1
+    assert fstat_descriptors == [opened_descriptors[0]]
+    assert read_descriptors and set(read_descriptors) == {opened_descriptors[0]}
+    assert key_file.read_text(encoding="utf-8") == "replacement-key"
 
 
 @pytest.mark.parametrize("attribute", ["wrong_owner", "nonregular"])
