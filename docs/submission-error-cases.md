@@ -17,8 +17,29 @@ Use this checklist before promoting a submission commit.
 - A direct-agent setting does not bypass checks that happen before
   orchestration. Credential or readiness failure can therefore break both
   direct and hybrid modes in the same way.
+- `AGENT_MODE` has no effect when the packaged entrypoint does not import the
+  modular application. Assert the packaged entrypoint and the active mode in
+  the same release test.
+- After rebasing or merging a submission fix, re-check configuration defaults;
+  a valid runtime commit can silently change `hybrid` back to `direct`.
 - Diagnose early failures in order: deployed SHA, image build/startup,
   readiness/credential delivery, request contract, then routing or MCP.
+
+## Test-environment mismatches
+
+- A sandbox `PermissionError` while binding loopback is not a product failure;
+  rerun the same socket tests in the approved loopback-capable environment.
+- Tests for a legacy entrypoint do not prove the active image. Keep the active
+  runtime suite separate, and require the packaging test to show that excluded
+  legacy files cannot affect the image.
+
+## Branch synchronization
+
+- Check whether the remote branch advanced before every push. Do not overwrite
+  newer work merely to make commit IDs equal.
+- If two branches must ship the same files, prefer a normal fast-forward commit
+  whose tree matches the validated candidate. Preserve the prior remote history
+  instead of force-pushing it away.
 
 ## Release checklist
 
