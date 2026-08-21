@@ -5,17 +5,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import multiprocessing
 import statistics
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 MODEL_ID = "team-chatbot"
 MAX_LATENCY_SECONDS = 165.0
+PREFLIGHT_TIMEOUT_SECONDS = 5.0
+_PROCESS_JOIN_SECONDS = 0.1
+_BATCH_OVERHEAD_SECONDS = 2.0
 SAFETY_FALLBACK = (
     "질문을 확인했습니다. 증상이 심하거나 갑자기 악화되면 즉시 119 또는 "
     "응급실의 도움을 받고, 정확한 판단을 위해 의료 전문가와 상담해 주세요."
@@ -48,9 +53,13 @@ def _nonnegative_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
-def validate_completion(payload: Any, latency_seconds: float) -> tuple[bool, bool]:
+def validate_completion(
+    payload: Any,
+    latency_seconds: float,
+    deadline_seconds: float = MAX_LATENCY_SECONDS,
+) -> tuple[bool, bool]:
     """Validate only the public response envelope and return (success, fallback)."""
-    if latency_seconds > MAX_LATENCY_SECONDS or not isinstance(payload, dict):
+    if latency_seconds > deadline_seconds or not isinstance(payload, dict):
         return False, False
     if payload.get("model") != MODEL_ID:
         return False, False
@@ -76,27 +85,94 @@ def validate_completion(payload: Any, latency_seconds: float) -> tuple[bool, boo
     return True, message["content"].strip() == SAFETY_FALLBACK
 
 
-def _read_json(request: Request, timeout: float) -> tuple[int, Any | None]:
+def _read_json_worker(
+    connection: Any,
+    base_url: str,
+    path: str,
+    body: bytes | None,
+    method: str,
+    timeout_seconds: float,
+) -> None:
+    """Perform one potentially blocking HTTP read in a process the caller can terminate."""
     try:
-        with urlopen(request, timeout=timeout) as response:  # noqa: S310 - caller supplies local URL.
+        request = Request(
+            f"{base_url.rstrip('/')}{path}",
+            data=body,
+            headers={"Content-Type": "application/json"} if body is not None else {},
+            method=method,
+        )
+        with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310 - supplied CLI endpoint.
             status = response.status
             try:
-                return status, json.loads(response.read().decode("utf-8"))
+                result = status, json.loads(response.read().decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
-                return status, None
+                result = status, None
     except HTTPError as error:
-        return error.code, None
-    except (TimeoutError, URLError, OSError):
+        result = error.code, None
+    except Exception:
+        result = 0, None
+    try:
+        connection.send(result)
+    except (BrokenPipeError, EOFError, OSError):
+        pass
+    finally:
+        connection.close()
+
+
+def _read_json(
+    base_url: str,
+    path: str,
+    body: bytes | None,
+    method: str,
+    timeout_seconds: float,
+) -> tuple[int, Any | None]:
+    """Use a monotonic deadline around a killable HTTP worker process."""
+    started = time.perf_counter()
+    process = None
+    receiver = None
+    sender = None
+    try:
+        receiver, sender = multiprocessing.get_context("spawn").Pipe(duplex=False)
+        process = multiprocessing.get_context("spawn").Process(
+            target=_read_json_worker,
+            args=(sender, base_url, path, body, method, timeout_seconds),
+            daemon=True,
+        )
+        process.start()
+        sender.close()
+        sender = None
+        remaining = max(0.0, timeout_seconds - (time.perf_counter() - started))
+        if receiver.poll(remaining):
+            try:
+                status, payload = receiver.recv()
+                if isinstance(status, int):
+                    return status, payload
+            except (EOFError, OSError):
+                pass
         return 0, None
+    except Exception:
+        return 0, None
+    finally:
+        if sender is not None:
+            sender.close()
+        if receiver is not None:
+            receiver.close()
+        if process is not None:
+            if process.is_alive():
+                process.terminate()
+            process.join(_PROCESS_JOIN_SECONDS)
+            if process.is_alive():
+                process.kill()
+                process.join(_PROCESS_JOIN_SECONDS)
 
 
-def _get_json(base_url: str, path: str) -> tuple[int, Any | None]:
-    return _read_json(Request(f"{base_url.rstrip('/')}{path}", method="GET"), timeout=5.0)
+def _get_json(base_url: str, path: str, timeout_seconds: float) -> tuple[int, Any | None]:
+    return _read_json(base_url, path, body=None, method="GET", timeout_seconds=timeout_seconds)
 
 
-def check_preflight(base_url: str) -> list[int]:
-    health_status, _ = _get_json(base_url, "/health")
-    models_status, models = _get_json(base_url, "/v1/models")
+def check_preflight(base_url: str, timeout_seconds: float = PREFLIGHT_TIMEOUT_SECONDS) -> list[int]:
+    health_status, _ = _get_json(base_url, "/health", timeout_seconds)
+    models_status, models = _get_json(base_url, "/v1/models", timeout_seconds)
     models_valid = (
         models_status == 200
         and isinstance(models, dict)
@@ -106,21 +182,63 @@ def check_preflight(base_url: str) -> list[int]:
     return [] if health_status == 200 and models_valid else [health_status, models_status]
 
 
-def send_completion(base_url: str) -> RequestResult:
+def send_completion(base_url: str, deadline_seconds: float = MAX_LATENCY_SECONDS) -> RequestResult:
     started = time.perf_counter()
-    body = json.dumps(REQUEST_PAYLOAD, ensure_ascii=False).encode("utf-8")
-    request = Request(
-        f"{base_url.rstrip('/')}/v1/chat/completions",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    status, payload = _read_json(request, timeout=MAX_LATENCY_SECONDS)
+    try:
+        body = json.dumps(REQUEST_PAYLOAD, ensure_ascii=False).encode("utf-8")
+        status, payload = _read_json(
+            base_url,
+            "/v1/chat/completions",
+            body=body,
+            method="POST",
+            timeout_seconds=deadline_seconds,
+        )
+    except Exception:
+        status, payload = 0, None
     latency = time.perf_counter() - started
     if status != 200:
         return RequestResult(status=status, latency_seconds=latency, success=False, fallback=False)
-    success, fallback = validate_completion(payload, latency)
+    success, fallback = validate_completion(payload, latency, deadline_seconds)
     return RequestResult(status=status, latency_seconds=latency, success=success, fallback=fallback)
+
+
+def _failed_result(started: float) -> RequestResult:
+    return RequestResult(
+        status=0,
+        latency_seconds=time.perf_counter() - started,
+        success=False,
+        fallback=False,
+    )
+
+
+def run_completions(
+    base_url: str,
+    requests: int,
+    concurrency: int,
+    deadline_seconds: float,
+) -> list[RequestResult]:
+    """Bound total wait while each network operation has its own killable absolute deadline."""
+    started = time.perf_counter()
+    batch_budget = math.ceil(requests / concurrency) * deadline_seconds + _BATCH_OVERHEAD_SECONDS
+    batch_deadline = started + batch_budget
+    executor = ThreadPoolExecutor(max_workers=concurrency)
+    futures = [
+        executor.submit(send_completion, base_url, deadline_seconds) for _ in range(requests)
+    ]
+    results: list[RequestResult] = []
+    try:
+        for future in futures:
+            remaining = batch_deadline - time.perf_counter()
+            if remaining <= 0:
+                break
+            try:
+                results.append(future.result(timeout=remaining))
+            except Exception:
+                results.append(_failed_result(started))
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+    results.extend(_failed_result(started) for _ in range(requests - len(results)))
+    return results
 
 
 def aggregate(results: list[RequestResult]) -> dict[str, Any]:
@@ -163,17 +281,29 @@ def _positive(value: str) -> int:
     return parsed
 
 
+def _deadline(value: str) -> float:
+    parsed = float(value)
+    if not 0 < parsed <= MAX_LATENCY_SECONDS:
+        message = f"must be greater than 0 and no more than {MAX_LATENCY_SECONDS}"
+        raise argparse.ArgumentTypeError(message)
+    return parsed
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate concurrent public completion envelopes.")
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--requests", type=_positive, default=16)
     parser.add_argument("--concurrency", type=_positive, default=16)
+    parser.add_argument("--deadline-seconds", type=_deadline, default=MAX_LATENCY_SECONDS)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    preflight_failures = check_preflight(args.base_url)
+    preflight_failures = check_preflight(
+        args.base_url,
+        timeout_seconds=min(PREFLIGHT_TIMEOUT_SECONDS, args.deadline_seconds),
+    )
     if preflight_failures:
         summary = {
             "requests": 0,
@@ -185,8 +315,12 @@ def main() -> int:
         }
         print_summary(summary)
         return 1
-    with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
-        results = list(executor.map(lambda _: send_completion(args.base_url), range(args.requests)))
+    results = run_completions(
+        args.base_url,
+        requests=args.requests,
+        concurrency=args.concurrency,
+        deadline_seconds=args.deadline_seconds,
+    )
     summary = aggregate(results)
     print_summary(summary)
     return exit_code(summary)
