@@ -3,6 +3,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from jsonschema import SchemaError, validators
 from pydantic import BaseModel, Field, ValidationError
 
 from harness.config import Settings
@@ -42,14 +43,19 @@ class RetrievalEngine:
             ChatMessage(role="user", content=query),
         ]
         calls_used = 0
+        planner_turns = 0
         async with self._mcp.connect() as connection:
             discovered = await connection.list_tools()
             if any(tool.name == "finalize_retrieval" for tool in discovered):
                 raise RetrievalError("MCP tool name collision: finalize_retrieval")
             tool_map = {tool.name: tool for tool in discovered}
+            for tool in discovered:
+                _validate_schema(tool.input_schema)
             tools = [tool.as_openai_tool() for tool in discovered] + [FINALIZE_RETRIEVAL_TOOL]
-            while calls_used < self._settings.max_tool_calls:
+            max_planner_turns = self._settings.max_tool_calls + 2
+            while planner_turns < max_planner_turns:
                 completion: L2Completion = await self._l2.complete(messages=messages, tools=tools, tool_choice="auto")
+                planner_turns += 1
                 messages.append(ChatMessage(role="assistant", content=completion.content, tool_calls=completion.tool_calls))
                 if not completion.tool_calls:
                     raise RetrievalError("Retrieval planner returned no tool calls")
@@ -66,6 +72,8 @@ class RetrievalEngine:
                         errors.append((call, error))
                     elif call.function.name not in tool_map:
                         errors.append((call, "unknown tool"))
+                    elif not _arguments_match_schema(arguments, tool_map[call.function.name].input_schema):
+                        errors.append((call, "arguments do not match tool schema"))
                     elif len(valid) >= remaining:
                         errors.append((call, "tool-call budget exhausted"))
                     else:
@@ -82,7 +90,7 @@ class RetrievalEngine:
                     return self._resolve(finalization, candidates)
                 if calls_used >= self._settings.max_tool_calls:
                     return self._partial(candidates)
-        return self._partial(candidates)
+        return self._partial(candidates, note="Retrieval planner turn limit exhausted before finalization.")
 
     async def _call(self, connection: Any, call: ToolCall, arguments: dict[str, Any]) -> tuple[str, list[str]]:
         try:
@@ -115,9 +123,14 @@ class RetrievalEngine:
         status = finalization.status if items else "no_evidence"
         return RetrievalResult(status=status, items=items, note=_truncate(finalization.note, self._settings.max_evidence_chars))
 
-    def _partial(self, candidates: Mapping[str, tuple[str, str]]) -> RetrievalResult:
+    def _partial(
+        self,
+        candidates: Mapping[str, tuple[str, str]],
+        *,
+        note: str = "MCP tool-call budget exhausted before finalization.",
+    ) -> RetrievalResult:
         items = self._bounded_items([(cite_uid, 0.0) for cite_uid in candidates], candidates)
-        return RetrievalResult(status="partial" if items else "no_evidence", items=items, note="MCP tool-call budget exhausted before finalization.")
+        return RetrievalResult(status="partial" if items else "no_evidence", items=items, note=note)
 
     def _bounded_items(self, selected: list[tuple[str, float]], candidates: Mapping[str, tuple[str, str]]) -> list[EvidenceItem]:
         items: list[EvidenceItem] = []
@@ -140,6 +153,18 @@ def _parse_arguments(raw: str) -> tuple[dict[str, Any], str | None]:
     if not isinstance(value, dict):
         return {}, "arguments must be a JSON object"
     return value, None
+
+
+def _validate_schema(schema: dict[str, Any]) -> None:
+    try:
+        validators.validator_for(schema).check_schema(schema)
+    except SchemaError as error:
+        raise RetrievalError("MCP tool schema is invalid") from error
+
+
+def _arguments_match_schema(arguments: dict[str, Any], schema: dict[str, Any]) -> bool:
+    validator = validators.validator_for(schema)(schema)
+    return not any(validator.iter_errors(arguments))
 
 
 def _tool_error(call: ToolCall, message: str) -> ChatMessage:

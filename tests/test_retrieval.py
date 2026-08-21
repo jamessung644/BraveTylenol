@@ -48,6 +48,63 @@ def tool(name: str = "lookup") -> MCPTool:
     return MCPTool(name=name, description=f"{name} description", input_schema={"type": "object"})
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [{}, {"code": 7}, {"code": "I10", "unexpected": True}],
+)
+async def test_retrieval_rejects_arguments_that_violate_discovered_tool_schema(settings_with_key, arguments):
+    l2 = ScriptedL2Client([
+        L2Completion(tool_calls=[tool_call("invalid", "lookup", arguments)]),
+        L2Completion(tool_calls=[tool_call("final", "finalize_retrieval", {"status": "no_evidence", "items": [], "note": "done"})]),
+    ])
+    schema = {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"], "additionalProperties": False}
+    mcp = FakeMCPClient([MCPTool(name="lookup", description="lookup", input_schema=schema)], {"lookup": MCPCallResult(content="{}")})
+
+    result = await RetrievalEngine(l2, mcp, settings_with_key).retrieve("query")
+
+    assert mcp.calls == []
+    assert result.status == "no_evidence"
+    tool_messages = [message.content for message in l2.calls[1]["messages"] if message.role == "tool"]
+    assert tool_messages == ['{"error":"arguments do not match tool schema"}']
+
+
+async def test_retrieval_invalid_discovered_schema_triggers_fallback_error(settings_with_key):
+    l2 = ScriptedL2Client([L2Completion(tool_calls=[tool_call("call", "lookup", {})])])
+    invalid_schema = {"type": "not-a-json-schema-type"}
+    mcp = FakeMCPClient([MCPTool(name="lookup", description="lookup", input_schema=invalid_schema)], {"lookup": MCPCallResult(content="{}")})
+
+    with pytest.raises(RetrievalError, match="schema"):
+        await RetrievalEngine(l2, mcp, settings_with_key).retrieve("query")
+    assert mcp.calls == []
+
+
+async def test_retrieval_bounds_invalid_planner_turns_and_returns_no_evidence(settings_with_key):
+    turns = settings_with_key.max_tool_calls + 2
+    l2 = ScriptedL2Client([L2Completion(tool_calls=[tool_call(str(index), "unknown", {})]) for index in range(turns)])
+
+    result = await RetrievalEngine(l2, FakeMCPClient([tool()], {}), settings_with_key).retrieve("query")
+
+    assert len(l2.calls) == turns
+    assert result.status == "no_evidence"
+    assert result.note == "Retrieval planner turn limit exhausted before finalization."
+
+
+async def test_retrieval_planner_turn_limit_returns_accumulated_candidates_as_partial(settings_with_key):
+    turns = settings_with_key.max_tool_calls + 2
+    l2 = ScriptedL2Client([
+        L2Completion(tool_calls=[tool_call("valid", "lookup", {})]),
+        *[L2Completion(tool_calls=[tool_call(str(index), "unknown", {})]) for index in range(1, turns)],
+    ])
+    mcp = FakeMCPClient([tool()], {"lookup": MCPCallResult(content='{"cite_uid":"kept"}')})
+
+    result = await RetrievalEngine(l2, mcp, settings_with_key).retrieve("query")
+
+    assert len(l2.calls) == turns
+    assert result.status == "partial"
+    assert [item.cite_uid for item in result.items] == ["kept"]
+    assert result.note == "Retrieval planner turn limit exhausted before finalization."
+
+
 async def test_retrieval_executes_tool_then_resolves_finalized_evidence(settings_with_key):
     l2 = ScriptedL2Client([
         L2Completion(tool_calls=[tool_call("call-1", "kcd_get_name", {"code": "I10"})]),

@@ -17,7 +17,8 @@ class FakeOrchestrator:
 
 
 @pytest.fixture
-def settings_without_key() -> Settings:
+def settings_without_key(monkeypatch: pytest.MonkeyPatch) -> Settings:
+    monkeypatch.delenv("LUNIT_FM_API_KEY", raising=False)
     return Settings()
 
 
