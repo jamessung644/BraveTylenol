@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -56,6 +57,22 @@ def _server(handler):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
+
+
+class _DripHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_POST(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", "100000")
+        self.end_headers()
+        self.wfile.write(b"{")
+        self.wfile.flush()
+        time.sleep(2.0)
+
+    def log_message(self, format, *args):
+        return
 
 
 def test_cli_writes_only_paired_answers_to_jsonl_and_prints_aggregate_metrics(tmp_path):
@@ -116,3 +133,103 @@ def test_output_path_must_be_outside_the_repository_unless_ignored(tmp_path):
 
     assert paired.output_path_allowed(tmp_path / "paired.jsonl", repository)
     assert not paired.output_path_allowed(repository / "paired.jsonl", repository)
+
+
+def test_post_json_enforces_an_absolute_deadline_against_a_drip_peer():
+    """An idle-only socket timeout would allow a peer dripping bytes to exceed the gate."""
+    paired = _load_paired_module()
+    server = _server(_DripHandler)
+    started = time.perf_counter()
+    try:
+        status, payload = paired._post_json(
+            f"http://127.0.0.1:{server.server_port}",
+            {"model": "team-chatbot", "messages": []},
+            timeout_seconds=0.2,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert (status, payload) == (0, None)
+    assert time.perf_counter() - started < 1.0
+
+
+def test_serialization_and_jsonl_encoding_fail_closed_without_output(tmp_path):
+    """A lone surrogate must become an aggregate failure instead of a traceback or partial JSONL."""
+    paired = _load_paired_module()
+    output = tmp_path / "paired.jsonl"
+
+    assert paired._post_json("http://127.0.0.1:1", {"content": "\ud800"}) == (0, None)
+    assert not paired.write_jsonl(
+        output,
+        [
+            {
+                "scenario": "fixture",
+                "domain": "fixture",
+                "direct_answer": "\ud800",
+                "score_answer": None,
+            }
+        ],
+    )
+    assert not output.exists()
+
+
+def test_main_sanitizes_jsonl_write_errors(monkeypatch, capsys, tmp_path):
+    """Letting a local output encoding failure reach stderr would leak unsafe diagnostics."""
+    paired = _load_paired_module()
+    arguments = type(
+        "Arguments",
+        (),
+        {
+            "direct_url": "http://direct.test",
+            "score_url": "http://score.test",
+            "output": tmp_path / "x",
+        },
+    )()
+    monkeypatch.setattr(paired, "parse_args", lambda: arguments)
+    monkeypatch.setattr(
+        paired,
+        "run_check",
+        lambda *_: (
+            [
+                {
+                    "scenario": "fixture",
+                    "domain": "fixture",
+                    "direct_answer": "\ud800",
+                    "score_answer": None,
+                }
+            ],
+            {
+                "requests": 1,
+                "direct": paired._aggregate([]),
+                "score": paired._aggregate([]),
+                "coverage": {},
+            },
+        ),
+    )
+
+    assert paired.main() == 1
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.startswith("paired_requests=0")
+
+
+def test_main_sanitizes_interrupts_without_stderr(monkeypatch, capsys, tmp_path):
+    """An operator interrupt during a request must not emit a traceback or request details."""
+    paired = _load_paired_module()
+    arguments = type(
+        "Arguments",
+        (),
+        {
+            "direct_url": "http://direct.test",
+            "score_url": "http://score.test",
+            "output": tmp_path / "x",
+        },
+    )()
+    monkeypatch.setattr(paired, "parse_args", lambda: arguments)
+    monkeypatch.setattr(paired, "run_check", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    assert paired.main() == 1
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert captured.out.startswith("paired_requests=0")

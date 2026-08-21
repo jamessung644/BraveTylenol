@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
-import json
+import os
 import stat
 import statistics
 import time
@@ -14,9 +14,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.error import HTTPError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+
+try:
+    from absolute_http import post_json
+except ModuleNotFoundError:
+    from scripts.absolute_http import post_json
 
 HARNESS_MODEL_ID = "team-chatbot"
 SIMULATOR_MODEL_ID = "patient-simulator-ko"
@@ -24,6 +27,7 @@ SIMULATOR_URL = "https://patient.hackathon.lunit.io/v1/chat/completions"
 REQUIRED_CONVERSATIONS = 5
 MAX_ASSISTANT_TURNS = 3
 MAX_LATENCY_SECONDS = 165.0
+MAX_KEY_FILE_BYTES = 65_536
 
 
 @dataclass
@@ -42,36 +46,51 @@ class ConversationResult:
 
 
 def read_api_key_file(path: Path) -> str:
-    """Read a regular owner-only credential file without exposing its contents."""
+    """Read one bounded owner-only regular file descriptor without path reopens."""
+    descriptor = -1
     try:
-        file_status = path.stat()
-        invalid_mode = stat.S_IMODE(file_status.st_mode) & (stat.S_IRWXG | stat.S_IRWXO)
-        if not stat.S_ISREG(file_status.st_mode) or invalid_mode:
+        if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "geteuid"):
             raise ValueError
-        key = path.read_text(encoding="utf-8").strip()
+        descriptor = os.open(os.fspath(path), os.O_RDONLY | os.O_NOFOLLOW)
+        file_status = os.fstat(descriptor)
+        invalid_mode = stat.S_IMODE(file_status.st_mode) & (stat.S_IRWXG | stat.S_IRWXO)
+        if (
+            not stat.S_ISREG(file_status.st_mode)
+            or file_status.st_uid != os.geteuid()
+            or invalid_mode
+            or not 0 < file_status.st_size <= MAX_KEY_FILE_BYTES
+        ):
+            raise ValueError
+        data = bytearray()
+        while len(data) <= MAX_KEY_FILE_BYTES:
+            chunk = os.read(descriptor, MAX_KEY_FILE_BYTES + 1 - len(data))
+            if not chunk:
+                break
+            data.extend(chunk)
+        if len(data) > MAX_KEY_FILE_BYTES:
+            raise ValueError
+        key = bytes(data).decode("utf-8").strip()
     except (OSError, UnicodeError, ValueError):
         raise ValueError("credential file is not usable") from None
+    finally:
+        if descriptor != -1:
+            try:
+                os.close(descriptor)
+            except OSError:
+                raise ValueError("credential file is not usable") from None
     if not key:
         raise ValueError("credential file is not usable")
     return key
 
 
 def _post_json(
-    url: str,
-    payload: dict[str, Any],
-    headers: dict[str, str],
+    url: Any,
+    payload: Any,
+    headers: Any,
+    timeout_seconds: float = MAX_LATENCY_SECONDS,
 ) -> tuple[int, Any | None]:
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    request = Request(url, data=body, headers=headers, method="POST")
     try:
-        with urlopen(request, timeout=MAX_LATENCY_SECONDS) as response:  # noqa: S310 - explicit CLI URL.
-            status = response.status
-            try:
-                return status, json.loads(response.read().decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                return status, None
-    except HTTPError as error:
-        return error.code, None
+        return post_json(url, payload, headers, timeout_seconds)
     except Exception:
         return 0, None
 
@@ -223,46 +242,48 @@ def _format_status_counts(counts: dict[int, int]) -> str:
     return ",".join(f"{status}:{count}" for status, count in counts.items()) or "none"
 
 
-def print_summary(results: list[ConversationResult]) -> None:
-    durations = [result.duration_seconds for result in results] or [0.0]
-    completed = sum(
-        result.status_failures == 0 and result.shape_failures == 0 for result in results
-    )
-    assistant_turns = sum(result.assistant_turns for result in results)
-    repeated_stops = sum(result.repeated_user_stops for result in results)
-    status_failures = sum(result.status_failures for result in results)
-    shape_failures = sum(result.shape_failures for result in results)
-    retries = sum(result.simulator_retries for result in results)
-    restarts = sum(result.simulator_restarts for result in results)
-    harness_latency_failures = sum(result.harness_latency_failures for result in results)
-    minimum_duration = min(durations)
-    median_duration = statistics.median(durations)
-    maximum_duration = max(durations)
-    simulator_statuses = _format_status_counts(_status_counts(results, "simulator_statuses"))
-    harness_statuses = _format_status_counts(_status_counts(results, "harness_statuses"))
-    harness_latencies = [latency for result in results for latency in result.harness_latencies]
-    minimum_harness_latency = min(harness_latencies) if harness_latencies else 0.0
-    median_harness_latency = statistics.median(harness_latencies) if harness_latencies else 0.0
-    maximum_harness_latency = max(harness_latencies) if harness_latencies else 0.0
-    print(
-        f"conversations={len(results)} completed={completed} "
-        f"assistant_turns={assistant_turns} repeated_user_stops={repeated_stops}"
-    )
-    print(
-        f"status_failures={status_failures} shape_failures={shape_failures} "
-        f"harness_latency_failures={harness_latency_failures} simulator_retries={retries} "
-        f"simulator_restarts={restarts}"
-    )
-    print(
-        f"duration_seconds=min={minimum_duration:.3f},median={median_duration:.3f},"
-        f"max={maximum_duration:.3f}"
-    )
-    print("simulator_status_counts=" + simulator_statuses)
-    print("harness_status_counts=" + harness_statuses)
-    print(
-        f"harness_latency_seconds=min={minimum_harness_latency:.3f},"
-        f"median={median_harness_latency:.3f},max={maximum_harness_latency:.3f}"
-    )
+def print_summary(results: list[ConversationResult]) -> bool:
+    """Emit aggregate-only output or fail silently when the output device is unsafe."""
+    try:
+        durations = [result.duration_seconds for result in results] or [0.0]
+        completed = sum(
+            result.status_failures == 0 and result.shape_failures == 0 for result in results
+        )
+        assistant_turns = sum(result.assistant_turns for result in results)
+        repeated_stops = sum(result.repeated_user_stops for result in results)
+        status_failures = sum(result.status_failures for result in results)
+        shape_failures = sum(result.shape_failures for result in results)
+        retries = sum(result.simulator_retries for result in results)
+        restarts = sum(result.simulator_restarts for result in results)
+        harness_latency_failures = sum(result.harness_latency_failures for result in results)
+        simulator_statuses = _format_status_counts(_status_counts(results, "simulator_statuses"))
+        harness_statuses = _format_status_counts(_status_counts(results, "harness_statuses"))
+        harness_latencies = [latency for result in results for latency in result.harness_latencies]
+        minimum_harness_latency = min(harness_latencies) if harness_latencies else 0.0
+        median_harness_latency = statistics.median(harness_latencies) if harness_latencies else 0.0
+        maximum_harness_latency = max(harness_latencies) if harness_latencies else 0.0
+        print(
+            f"conversations={len(results)} completed={completed} "
+            f"assistant_turns={assistant_turns} repeated_user_stops={repeated_stops}"
+        )
+        print(
+            f"status_failures={status_failures} shape_failures={shape_failures} "
+            f"harness_latency_failures={harness_latency_failures} simulator_retries={retries} "
+            f"simulator_restarts={restarts}"
+        )
+        print(
+            f"duration_seconds=min={min(durations):.3f},"
+            f"median={statistics.median(durations):.3f},max={max(durations):.3f}"
+        )
+        print("simulator_status_counts=" + simulator_statuses)
+        print("harness_status_counts=" + harness_statuses)
+        print(
+            f"harness_latency_seconds=min={minimum_harness_latency:.3f},"
+            f"median={median_harness_latency:.3f},max={maximum_harness_latency:.3f}"
+        )
+        return True
+    except Exception:
+        return False
 
 
 def _url(value: str) -> str:
@@ -302,19 +323,20 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
-    arguments = parse_args()
     try:
+        arguments = parse_args()
         api_key = read_api_key_file(arguments.api_key_file)
-    except ValueError:
+        results = run_smoke(
+            harness_url=arguments.harness_url,
+            api_key=api_key,
+            conversations=arguments.conversations,
+            max_turns=arguments.max_turns,
+        )
+    except (Exception, KeyboardInterrupt):
         print_summary([])
         return 1
-    results = run_smoke(
-        harness_url=arguments.harness_url,
-        api_key=api_key,
-        conversations=arguments.conversations,
-        max_turns=arguments.max_turns,
-    )
-    print_summary(results)
+    if not print_summary(results):
+        return 1
     return int(
         any(
             result.status_failures or result.shape_failures or result.harness_latency_failures

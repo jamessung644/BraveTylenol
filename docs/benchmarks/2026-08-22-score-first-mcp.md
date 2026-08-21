@@ -86,11 +86,48 @@ per-harness-latency, retry, or restart failures.
 | Conversation duration, min / median / max | 44.200 / 175.140 / 275.151 s |
 | Harness latency, min / median / max | 28.720 / 32.919 / 124.536 s |
 
+## Verification-boundary hardening rerun
+
+The verification scripts were subsequently hardened without changing the
+container application or image. The corrected request helper runs each outbound
+JSON request in a killable child process with one absolute wall-clock deadline,
+so a peer that continuously drips bytes cannot extend the request indefinitely.
+Request construction, JSON serialization, and paired JSONL writing fail closed
+to aggregate-only results. The patient credential reader opens and validates one
+non-symlink, owner-only regular-file descriptor before reading its bounded,
+nonblank UTF-8 value.
+
+| Check | Observed result |
+| --- | --- |
+| Focused hardening tests | 17 passed |
+| Full test suite | 241 passed |
+| Ruff (`python3 -m ruff`) | passed |
+| `git diff --check` | passed |
+| Application image rebuild | not run (application image unchanged) |
+| 16×16 rerun | not run (application image unchanged) |
+
+The corrected paired check was rerun against the existing image with the same
+two explicitly named containers. Both paths had 7 valid completions, 0
+fallbacks, and 0 failures. Direct latency was 15.915 / 23.232 / 33.896 s and
+score-first latency was 23.413 / 43.680 / 110.081 s (minimum / median /
+maximum). Fixed scenario-domain coverage remained `drug:1`, `drug_safety:1`,
+`emergency:1`, `general_health:1`, `guideline:1`, `law:1`, and
+`reimbursement:1`.
+
+The corrected five-conversation patient-simulator rerun was deliberately
+interrupted by the user before completion after roughly eleven minutes to
+expedite handoff. It has no completion aggregate and is not claimed as a
+successful rerun. The prior completed patient-smoke evidence above remains the
+only completed patient live result for this unchanged application image. Both
+explicitly named containers were stopped after the interruption.
+
 ## Security record and limitations
 
 - No OpenAI key, SDK, grader, or judge credential was used.
 - The authorized Lunit key file was checked only for existence and restrictive
-  permissions; its value was neither displayed nor recorded.
+  permissions; the hardened reader additionally validates descriptor ownership,
+  type, mode, bounded size, and nonblank UTF-8 content before use. Its value was
+  neither displayed nor recorded.
 - No headers, prompts, messages, answers, evidence, response bodies, or raw
   exception bodies were printed or committed.
 - Paired JSONL remained outside Git at `/tmp/brave-tylenol-paired.jsonl`.

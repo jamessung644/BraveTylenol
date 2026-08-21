@@ -63,8 +63,9 @@ Valid requests always return model `team-chatbot`, a nonblank assistant choice,
 | `verification.py` | High-risk L2 answer repair under the remaining request deadline |
 | `orchestrator.py` | Typed score-first routing and direct/static recovery order |
 | `scripts/concurrent_smoke.py` | Aggregate-only 16×16 public-envelope gate |
+| `scripts/absolute_http.py` | Killable, absolute-deadline JSON request isolation for live verification |
 | `scripts/paired_quality_check.py` | Fixed seven-scenario direct-versus-score answer capture outside Git |
-| `scripts/patient_simulator_smoke.py` | Five-conversation bounded official patient-simulator smoke gate |
+| `scripts/patient_simulator_smoke.py` | Five-conversation bounded official patient-simulator smoke gate with descriptor-safe credential loading |
 
 ## Runtime and privacy boundaries
 
@@ -77,6 +78,11 @@ The Lunit credential is resolved internally and never placed in logs, smoke
 output, Docker build context, or version control. Authorization values, user
 messages, patient-simulator turns, generated answers, prompts, raw MCP evidence,
 raw response bodies, and raw exception bodies are not logged. Operational output
-is restricted to aggregate status, latency, fallback, and shape metrics. Paired
-answers are written only to a caller-selected path outside the repository (or a
-Git-ignored path), with restrictive file permissions.
+is restricted to aggregate status, latency, fallback, and shape metrics. Live
+verification isolates each outbound request behind one killable absolute
+wall-clock deadline, including serialization and request construction. Paired
+answers are written atomically only to a caller-selected path outside the
+repository (or a Git-ignored path), with restrictive file permissions. The
+patient-simulator key reader opens one non-symlink descriptor, validates regular
+file type, effective-user ownership, owner-only mode, size, and nonblank UTF-8
+content, then reads that same descriptor without a path re-open.
