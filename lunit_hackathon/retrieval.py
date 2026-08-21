@@ -54,6 +54,23 @@ class RetrievalEngine:
         self._settings = settings
 
     async def retrieve(self, query: str) -> RetrievalResult:
+        # Retrieval is optional. Give it a bounded share of the end-to-end
+        # deadline so a slow MCP session or planner still leaves time for the
+        # orchestrator's direct L2 fallback.
+        retrieval_timeout = min(
+            45.0,
+            self._settings.request_timeout_seconds * 0.45,
+        )
+        try:
+            async with asyncio.timeout(retrieval_timeout):
+                return await self._retrieve(query)
+        except TimeoutError as error:
+            raise RetrievalError(
+                "Retrieval exceeded its time budget",
+                code="retrieval_timeout",
+            ) from error
+
+    async def _retrieve(self, query: str) -> RetrievalResult:
         candidates: dict[str, tuple[str, str]] = {}
         messages = [
             ChatMessage(role="system", content=RETRIEVAL_PLANNER_SYSTEM_PROMPT),
@@ -88,7 +105,9 @@ class RetrievalEngine:
                 len(selected_tools),
                 call_budget,
             )
-            max_planner_turns = max(2, call_budget + 2)
+            # One planner turn per permitted call plus one finalization turn.
+            # Invalid calls consume that turn instead of extending latency.
+            max_planner_turns = max(1, call_budget + 1)
 
             while planner_turns < max_planner_turns:
                 budget_exhausted = calls_used >= call_budget
@@ -441,8 +460,12 @@ def _effective_call_budget(
     selected: list[Any],
     discovered: list[Any],
 ) -> int:
+    if not selected:
+        return 0
+    # Two calls cover the routed primary/secondary evidence sources while
+    # keeping the multi-stage request inside the evaluation deadline.
     if len(selected) == len(discovered):
-        return configured
+        return min(configured, 2)
     return min(configured, len(selected), 2)
 
 

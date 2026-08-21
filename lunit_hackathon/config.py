@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _PLACEHOLDERS = {"", "여기에_직접_입력", "lunit_replace_me"}
@@ -41,7 +41,10 @@ class Settings(BaseSettings):
         default=110.0,
         gt=0,
         le=175,
-        validation_alias="REQUEST_TIMEOUT_SECONDS",
+        validation_alias=AliasChoices(
+            "REQUEST_TIMEOUT_SECONDS",
+            "UPSTREAM_TIMEOUT_SECONDS",
+        ),
     )
     retry_attempts: int = Field(
         default=2,
@@ -61,10 +64,18 @@ class Settings(BaseSettings):
     )
     agent_mode: Literal["rag", "passthrough"] = Field(
         default="rag",
-        validation_alias="AGENT_MODE",
+        validation_alias=AliasChoices("AGENT_MODE", "HARNESS_MODE"),
     )
-    mcp_url: str | None = Field(default=None, validation_alias="LUNIT_MCP_URL")
-    max_mcp_calls: int = Field(default=4, ge=0, le=12, validation_alias="MAX_MCP_CALLS")
+    mcp_url: str | None = Field(
+        default="https://mcp.hackathon.lunit.io/mcp",
+        validation_alias="LUNIT_MCP_URL",
+    )
+    max_mcp_calls: int = Field(
+        default=4,
+        ge=0,
+        le=12,
+        validation_alias=AliasChoices("MAX_MCP_CALLS", "MAX_TOOL_CALLS"),
+    )
     max_tool_result_chars: int = Field(
         default=12_000,
         ge=1_000,
@@ -77,7 +88,10 @@ class Settings(BaseSettings):
         le=200_000,
         validation_alias="MAX_EVIDENCE_CHARS",
     )
-    log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
+    log_level: str = Field(
+        default="INFO",
+        validation_alias=AliasChoices("LOG_LEVEL", "HARNESS_LOG_LEVEL"),
+    )
 
     @field_validator(
         "lunit_fm_api_key",

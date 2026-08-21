@@ -100,6 +100,37 @@ async def test_chat_forwards_evaluator_bearer_key_to_l2(monkeypatch):
     assert RecordingL2.received_api_key == "evaluator-secret"
 
 
+async def test_chat_prefers_evaluator_bearer_over_environment_key(monkeypatch):
+    monkeypatch.setenv("LUNIT_FM_API_KEY", "stale-deployment-key")
+
+    class RecordingL2:
+        received_api_key = None
+
+        def __init__(self, settings, *, http_client=None):
+            del http_client
+            type(self).received_api_key = settings.api_key
+            self.last_usage = TokenUsage()
+
+        async def complete(self, **kwargs):
+            del kwargs
+            return L2Completion(content="요청 키 사용 성공")
+
+    monkeypatch.setattr("app.L2Client", RecordingL2)
+    app = create_app(Settings(_env_file=None))
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer evaluator-secret"},
+            json={"model": "team-chatbot", "messages": [{"role": "user", "content": "질문"}]},
+        )
+
+    assert response.status_code == 200
+    assert RecordingL2.received_api_key == "evaluator-secret"
+
+
 async def test_chat_rejects_non_bearer_authorization(monkeypatch):
     monkeypatch.delenv("LUNIT_FM_API_KEY", raising=False)
     app = create_app(Settings(_env_file=None), FakeOrchestrator())

@@ -101,6 +101,12 @@ class GenerationEngine:
                 second,
                 retrieval_result,
             )
+        if second.content is not None and second.content.strip():
+            return await self._final_with_required_citations(
+                conversation,
+                L2Completion(content=second.content),
+                retrieval_result,
+            )
 
         conversation.append(_assistant_message(second))
         for call in second.tool_calls:
@@ -119,10 +125,9 @@ class GenerationEngine:
                 ),
             }
         )
-        final = await self._request_final_submission(conversation, retrieval_result)
-        submitted = _submitted_content(final)
-        if submitted is not None:
-            final = L2Completion(content=submitted)
+        # The structured submission was malformed. Retry without tools so the
+        # recovery instruction and API contract do not contradict each other.
+        final = await self._l2.complete(messages=conversation)
         return await self._final_with_required_citations(
             conversation,
             final,
@@ -183,8 +188,8 @@ class GenerationEngine:
                     ),
                 }
             )
-            completion = await self._request_final_submission(conversation, retrieval)
-            content = _submitted_content(completion) or _final_content(completion)
+            completion = await self._l2.complete(messages=conversation)
+            content = _final_content(completion)
 
         missing = _missing_cite_uids(content, retrieval)
         if not missing:
@@ -203,8 +208,8 @@ class GenerationEngine:
                 ),
             }
         )
-        corrected = await self._request_final_submission(conversation, retrieval)
-        corrected_content = _submitted_content(corrected) or _final_content(corrected)
+        corrected = await self._l2.complete(messages=conversation)
+        corrected_content = _final_content(corrected)
         remaining = _missing_cite_uids(corrected_content, retrieval)
         if remaining:
             logger.warning("l2_citation_omitted citation_count=%d", len(remaining))
@@ -256,7 +261,7 @@ def _valid_query(call: ToolCall) -> str | None:
         arguments = json.loads(call.function.arguments)
     except (TypeError, json.JSONDecodeError):
         return None
-    if not isinstance(arguments, Mapping) or set(arguments) != {"query"}:
+    if not isinstance(arguments, Mapping) or "query" not in arguments:
         return None
     query = arguments["query"]
     if not isinstance(query, str):
@@ -384,7 +389,7 @@ def _submitted_content(completion: L2Completion) -> str | None:
             arguments = json.loads(call.function.arguments)
         except (TypeError, json.JSONDecodeError):
             continue
-        if not isinstance(arguments, Mapping) or set(arguments) != {"answer"}:
+        if not isinstance(arguments, Mapping) or "answer" not in arguments:
             continue
         answer = arguments["answer"]
         if isinstance(answer, str) and answer.strip():

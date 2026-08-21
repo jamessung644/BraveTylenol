@@ -148,7 +148,10 @@ def create_app(
     ) -> ChatCompletionResponse:
         if request.stream:
             raise HTTPException(status_code=400, detail="Streaming is not supported")
-        request_api_key = resolved_settings.api_key or _bearer_token(authorization)
+        # CoEval owns the credential carried by each request. Prefer it over a
+        # possibly stale deployment-level fallback so one bad environment value
+        # cannot make every otherwise valid evaluation request fail with 401.
+        request_api_key = _bearer_token(authorization) or resolved_settings.api_key
         if not request_api_key:
             raise HTTPException(
                 status_code=503,
