@@ -118,7 +118,10 @@ def _read_json_worker(
     except (BrokenPipeError, EOFError, OSError):
         pass
     finally:
-        connection.close()
+        try:
+            connection.close()
+        except (BrokenPipeError, EOFError, OSError):
+            pass
 
 
 def _read_json(
@@ -134,6 +137,8 @@ def _read_json(
     receiver = None
     sender = None
     process_started = False
+    result: tuple[int, Any | None] = (0, None)
+    cleanup_failed = False
     try:
         receiver, sender = multiprocessing.get_context("spawn").Pipe(duplex=False)
         process = multiprocessing.get_context("spawn").Process(
@@ -150,33 +155,52 @@ def _read_json(
             try:
                 status, payload = receiver.recv()
                 if isinstance(status, int):
-                    return status, payload
+                    result = status, payload
             except (EOFError, OSError):
                 pass
-        return 0, None
     except Exception:
-        return 0, None
+        result = 0, None
     finally:
         if sender is not None:
             try:
                 sender.close()
             except OSError:
-                pass
+                cleanup_failed = True
         if receiver is not None:
             try:
                 receiver.close()
             except OSError:
-                pass
+                cleanup_failed = True
         if process is not None and process_started:
+            alive: bool | None = None
             try:
-                if process.is_alive():
-                    process.terminate()
-                process.join(_PROCESS_JOIN_SECONDS)
-                if process.is_alive():
-                    process.kill()
-                    process.join(_PROCESS_JOIN_SECONDS)
+                alive = process.is_alive()
             except (AssertionError, OSError):
-                pass
+                cleanup_failed = True
+            if alive is not False:
+                try:
+                    process.terminate()
+                except (AssertionError, OSError):
+                    cleanup_failed = True
+            try:
+                process.join(_PROCESS_JOIN_SECONDS)
+            except (AssertionError, OSError):
+                cleanup_failed = True
+            alive_after: bool | None = None
+            try:
+                alive_after = process.is_alive()
+            except (AssertionError, OSError):
+                cleanup_failed = True
+            if alive_after is not False:
+                try:
+                    process.kill()
+                except (AssertionError, OSError):
+                    cleanup_failed = True
+            try:
+                process.join(_PROCESS_JOIN_SECONDS)
+            except (AssertionError, OSError):
+                cleanup_failed = True
+    return (0, None) if cleanup_failed else result
 
 
 def _get_json(base_url: str, path: str, timeout_seconds: float) -> tuple[int, Any | None]:
@@ -235,11 +259,26 @@ def run_completions(
     workers = effective_workers(requests, concurrency)
     batch_budget = math.ceil(requests / workers) * deadline_seconds + _BATCH_OVERHEAD_SECONDS
     batch_deadline = started + batch_budget
-    executor = ThreadPoolExecutor(max_workers=workers)
-    futures = [
-        executor.submit(send_completion, base_url, deadline_seconds) for _ in range(requests)
-    ]
+    executor = None
+    futures = []
+    try:
+        executor = ThreadPoolExecutor(max_workers=workers)
+        for _ in range(requests):
+            futures.append(executor.submit(send_completion, base_url, deadline_seconds))
+    except Exception:
+        for future in futures:
+            try:
+                future.cancel()
+            except Exception:
+                pass
+        if executor is not None:
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+        return [_failed_result(started) for _ in range(requests)]
     results: list[RequestResult] = []
+    shutdown_failed = False
     try:
         for future in futures:
             remaining = batch_deadline - time.perf_counter()
@@ -250,7 +289,13 @@ def run_completions(
             except Exception:
                 results.append(_failed_result(started))
     finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+        try:
+            executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            shutdown_failed = True
+    if shutdown_failed:
+        results.extend(_failed_result(started) for _ in range(requests - len(results)))
+        return results
     results.extend(_failed_result(started) for _ in range(requests - len(results)))
     return results
 
