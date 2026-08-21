@@ -46,8 +46,9 @@
                                   v
                            L2 최종 텍스트 그대로 반환
 
-AGENT_MODE=passthrough는 MCP 효과 비교와 장애 진단을 위한 L2 직접 호출 모드다. 기본값은
-rag다.
+기본 컨테이너는 MCP URL이 없으므로 안전 프롬프트 기반 L2 직접 호출을 한 번 수행한다.
+LUNIT_MCP_URL을 명시하면 RAG를 활성화하며, AGENT_MODE=passthrough는 검색 조정 없이 동일한
+안전 프롬프트를 적용하는 진단 모드다.
 
 ## 컴포넌트
 
@@ -82,7 +83,7 @@ rag다.
 런타임 네트워크 대상은 다음 두 종류뿐이다.
 
 1. 필수 Lunit L2 endpoint (LUNIT_FM_API_URL)
-2. 대회에서 공식 제공된 MCP endpoint(기본값, LUNIT_MCP_URL로 재정의 가능)
+2. LUNIT_MCP_URL을 명시했을 때만 사용하는 대회 공식 MCP endpoint
 
 일반 웹 검색, 상용 검색 API, 클라우드 벡터 DB, 원격 분석 서비스, 외부 인증 서비스에는
 의존하지 않는다. MCP가 구성되지 않아도 L2-only 폴백으로 동작한다. 컨테이너에는 .env,

@@ -43,16 +43,17 @@ def test_latency_controls_have_safe_defaults(monkeypatch):
 
     settings = Settings(_env_file=None)
 
-    assert settings.max_completion_tokens == 3072
+    assert settings.request_timeout_seconds == 65
+    assert settings.max_completion_tokens == 1024
     assert settings.reasoning_effort == "low"
 
 
-def test_container_defaults_to_official_mcp_endpoint(monkeypatch):
+def test_container_defaults_to_one_call_direct_mode(monkeypatch):
     monkeypatch.delenv("LUNIT_MCP_URL", raising=False)
 
     settings = Settings(_env_file=None)
 
-    assert settings.mcp_url == "https://mcp.hackathon.lunit.io/mcp"
+    assert settings.mcp_url is None
 
 
 def test_legacy_baseline_environment_names_remain_supported(monkeypatch):

@@ -25,7 +25,7 @@ class UnusedGeneration:
         raise AssertionError("generation must not run")
 
 
-async def test_passthrough_sends_original_messages_directly_to_l2():
+async def test_passthrough_adds_safety_prompt_before_original_messages():
     l2 = FakeL2()
     messages = [
         ChatMessage(role="user", content="첫 질문"),
@@ -41,7 +41,10 @@ async def test_passthrough_sends_original_messages_directly_to_l2():
     answer = await orchestrator.answer(messages)
 
     assert answer == "L2 passthrough"
-    assert l2.calls[0]["messages"] == messages
+    sent_messages = l2.calls[0]["messages"]
+    assert sent_messages[0].role == "system"
+    assert "sole author" in sent_messages[0].content
+    assert sent_messages[1:] == messages
     assert orchestrator.last_usage.total_tokens == 8
 
 

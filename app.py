@@ -123,6 +123,7 @@ def create_app(
         return response
 
     @application.get("/health")
+    @application.get("/healthz", include_in_schema=False)
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
