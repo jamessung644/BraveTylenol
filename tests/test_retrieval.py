@@ -115,6 +115,45 @@ async def test_retrieval_immediate_finalization_has_no_evidence(settings_with_ke
     assert result.note == "non-citable fact"
 
 
+async def test_retrieval_processes_valid_sibling_before_finalizing(settings_with_key):
+    l2 = ScriptedL2Client([L2Completion(tool_calls=[
+        tool_call("lookup", "lookup", {}),
+        tool_call("final", "finalize_retrieval", {"status": "sufficient", "items": [{"cite_uid": "cite", "relevance_score": 1}], "note": ""}),
+    ])])
+    mcp = FakeMCPClient([tool()], {"lookup": MCPCallResult(content='{"cite_uid":"cite"}')})
+
+    result = await RetrievalEngine(l2, mcp, settings_with_key).retrieve("query")
+
+    assert mcp.calls == [("lookup", {})]
+    assert [item.cite_uid for item in result.items] == ["cite"]
+
+
+@pytest.mark.parametrize("name, arguments", [("missing", {}), ("lookup", "{")])
+async def test_retrieval_processes_invalid_sibling_before_finalizing(settings_with_key, monkeypatch, name, arguments):
+    errors = []
+    from harness import retrieval
+
+    original_tool_error = retrieval._tool_error
+
+    def record_tool_error(call, message):
+        errors.append((call.id, message))
+        return original_tool_error(call, message)
+
+    monkeypatch.setattr(retrieval, "_tool_error", record_tool_error)
+    l2 = ScriptedL2Client([L2Completion(tool_calls=[
+        tool_call("invalid", name, arguments),
+        tool_call("final", "finalize_retrieval", {"status": "no_evidence", "items": [], "note": "done"}),
+    ])])
+    mcp = FakeMCPClient([tool()], {"lookup": MCPCallResult(content='{"cite_uid":"unexpected"}')})
+
+    result = await RetrievalEngine(l2, mcp, settings_with_key).retrieve("query")
+
+    assert mcp.calls == []
+    assert errors[0][0] == "invalid"
+    assert result.status == "no_evidence"
+    assert result.note == "done"
+
+
 async def test_retrieval_normalizes_duplicate_scores_and_total_evidence_limit(settings_with_key, monkeypatch):
     monkeypatch.setenv("MAX_EVIDENCE_CHARS", "2000")
     settings = type(settings_with_key)()

@@ -53,15 +53,14 @@ class RetrievalEngine:
                 messages.append(ChatMessage(role="assistant", content=completion.content, tool_calls=completion.tool_calls))
                 if not completion.tool_calls:
                     raise RetrievalError("Retrieval planner returned no tool calls")
-                final_call = next((call for call in completion.tool_calls if call.function.name == "finalize_retrieval"), None)
-                if final_call is not None:
-                    finalization = self._parse_finalization(final_call)
-                    return self._resolve(finalization, candidates)
-
+                finalization: _Finalization | None = None
                 valid: list[tuple[ToolCall, dict[str, Any]]] = []
                 errors: list[tuple[ToolCall, str]] = []
                 remaining = self._settings.max_tool_calls - calls_used
                 for call in completion.tool_calls:
+                    if call.function.name == "finalize_retrieval":
+                        finalization = self._parse_finalization(call)
+                        continue
                     arguments, error = _parse_arguments(call.function.arguments)
                     if error:
                         errors.append((call, error))
@@ -79,6 +78,8 @@ class RetrievalEngine:
                     messages.append(ChatMessage(role="tool", tool_call_id=call.id, content=result))
                     for cite_uid in cite_uids:
                         candidates.setdefault(cite_uid, (call.function.name, result))
+                if finalization is not None:
+                    return self._resolve(finalization, candidates)
                 if calls_used >= self._settings.max_tool_calls:
                     return self._partial(candidates)
         return self._partial(candidates)
