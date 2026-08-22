@@ -175,8 +175,34 @@ class BoundedL2GatewayTest(unittest.TestCase):
         self.assertEqual(outbound.get_header("Authorization"), "Bearer lunit_request_test")
         body = json.loads(outbound.data)
         self.assertEqual(body["model"], "Lunit/L2-preview")
-        self.assertEqual(body["max_tokens"], 4_096)
+        self.assertEqual(body["max_tokens"], 6_144)
         self.assertEqual(body["messages"][-1]["content"], "혈압이 높으면 어떻게 해야 하나요?")
+
+    def test_source_dependent_question_stays_on_direct_single_l2_path(self):
+        opener = RecordingOpener(
+            FakeResponse({"choices": [{"message": {"content": "근거를 구분한 답변"}}]})
+        )
+        result = main.request_l2_or_fallback(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "최신 진료지침 근거를 포함해 고혈압 치료 목표를 설명해주세요.",
+                    }
+                ]
+            },
+            "Bearer lunit_request_test",
+            opener=opener,
+            environ={},
+        )
+
+        self.assertEqual(result["choices"][0]["message"]["content"], "근거를 구분한 답변")
+        self.assertEqual(len(opener.requests), 1)
+        body = json.loads(opener.requests[0].data)
+        self.assertNotIn(
+            "OFFICIAL REFERENCE DATA",
+            "\n".join(message["content"] for message in body["messages"]),
+        )
 
     def test_complex_request_still_uses_only_one_l2_generation(self):
         opener = RecordingOpener(
@@ -200,16 +226,6 @@ class BoundedL2GatewayTest(unittest.TestCase):
 
         self.assertEqual(result["choices"][0]["message"]["content"], "완전한 1차 답변")
         self.assertEqual(len(opener.requests), 1)
-
-    def test_generic_adjective_before_side_effect_is_not_treated_as_drug_name(self):
-        messages = [
-            {
-                "role": "user",
-                "content": "예상되는 부작용과 증상 변화에 따른 대처 방법을 설명해주세요.",
-            }
-        ]
-
-        self.assertIsNone(main._select_mcp_route(messages))
 
     def test_l2_failure_raises_retryable_error_without_internal_retry(self):
         failures = [
