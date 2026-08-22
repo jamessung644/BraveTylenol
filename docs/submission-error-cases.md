@@ -72,6 +72,11 @@ Use this checklist before promoting a submission commit.
   before promotion rather than reducing the timeout to manufacture faster errors.
   Retrieval is optional and must preserve the configured final-answer reserve;
   successful MCP transport followed by a starved final is still a failed request.
+- A 145-second primary attempt followed by recovery can consume the entire
+  165-second request deadline and make the L2-only safety notice unreachable.
+  Every primary final and clean-recovery network call therefore locks 35 seconds:
+  30 for `safe_completion_final` and 5 for HTTP response cleanup. A fully spent
+  primary slice must skip the recovery network call and use the locked safety slice.
 - Validate direct, emergency, MCP-success, and MCP-failure paths separately.
   Record aggregate status, latency, finish reason, call count, and citation yield,
   but never credentials, prompts, answers, raw evidence, or citation identifiers.
@@ -114,6 +119,32 @@ Use this checklist before promoting a submission commit.
   remains 2,048 and decision/retrieval remains 1,536. Treat the percentage
   reductions as configuration changes, not a latency claim, until the same
   direct/RAG prompts are remeasured on the exact image.
+
+## Organizer endpoint traffic incidents
+
+- On 2026-08-22 the organizer reported an L2 endpoint error-rate increase caused
+  by traffic. During the same window, a previously successful frozen medication
+  case timed out at C1 with both the compact legacy prompt and the canonical
+  prompt. Do not classify that observation as a question, prompt, or token-cap
+  regression without a healthy-endpoint control.
+- A clean `linux/amd64` candidate then returned one direct-shaped C1 response in
+  14.1 seconds, but the immediately following frozen 20-case C16 run returned
+  only 8 HTTP 200 responses and 12 early HTTP 502 responses. Sanitized container
+  counters attributed the failures to 13 upstream HTTP 502 events, with zero
+  local timeout or transport events. A later C2 probe entered a tail longer than
+  two minutes and was cancelled. This is not a passing C16 result; it is also not
+  evidence for lowering the submitted model concurrency while the organizer has
+  an acknowledged traffic incident. Re-run the identical image after service
+  recovery and require 16/16 HTTP 200 before promotion.
+- The temporary development load-balancer address announced by the organizer
+  also failed its `/health` probe from this runner within 10 seconds. Keep the
+  submitted runtime restricted to the official HTTPS Model/MCP endpoints; an
+  announced development endpoint may be used only for an explicit canary and
+  must never be compiled into the release allowlist.
+- C16 is a hard release gate: the exact image must return 16/16 HTTP 200,
+  nonempty L2-authored content, and zero 502/504 responses. Limit simultaneous
+  multi-call RAG trajectories to four and immediately downgrade overflow to a
+  one-call L2 final so MCP cannot monopolize the C16 cohort.
 
 ## Approved official-network validation
 

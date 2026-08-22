@@ -274,6 +274,109 @@ def test_remaining_request_seconds_uses_the_shared_absolute_deadline(monkeypatch
     assert client.remaining_request_seconds() == 145
 
 
+def test_deadline_reserve_preserves_a_later_safe_completion_slice(monkeypatch):
+    settings = settings_with_key(monkeypatch).model_copy(
+        update={"request_timeout_seconds": 165, "model_attempt_timeout_seconds": 145}
+    )
+    clock = iter((100.0, 230.0, 230.0))
+    monkeypatch.setattr("lunit_hackathon.l2_client.perf_counter", lambda: next(clock))
+    client = L2Client(settings)
+
+    timeout, wall_timeout = client._remaining_timeout(
+        145,
+        deadline_reserve_seconds=35,
+    )
+
+    assert wall_timeout == 130
+    assert timeout.read == 130
+    assert timeout.write == 130
+    assert timeout.connect == 5
+    assert timeout.pool == 5
+    with pytest.raises(UpstreamTimeoutError, match="reserve exhausted"):
+        client._remaining_timeout(145, deadline_reserve_seconds=35)
+
+    safe_timeout, safe_wall_timeout = client._remaining_timeout(
+        30,
+        deadline_reserve_seconds=5,
+    )
+    assert safe_wall_timeout == 30
+    assert safe_timeout.read == 30
+    assert safe_timeout.write == 30
+
+
+async def test_blank_completion_recovery_keeps_the_deadline_reserve(monkeypatch):
+    settings = settings_with_key(monkeypatch).model_copy(
+        update={"request_timeout_seconds": 65}
+    )
+    observed_timeouts = []
+    responses = iter(
+        [
+            httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": " ",
+                                "reasoning": "A short final answer is ready.",
+                            },
+                            "finish_reason": "length",
+                        }
+                    ]
+                },
+            ),
+            httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "복구 성공"}}]},
+            ),
+        ]
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        observed_timeouts.append(request.extensions["timeout"])
+        return next(responses)
+
+    clock = iter((100.0, 100.0, 101.0, 110.0, 110.0, 111.0))
+    monkeypatch.setattr("lunit_hackathon.l2_client.perf_counter", lambda: next(clock))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        result = await L2Client(settings, http_client=http_client).complete(
+            messages=[{"role": "user", "content": "질문"}],
+            deadline_reserve_seconds=20,
+        )
+
+    assert result.content == "복구 성공"
+    assert [timeout["read"] for timeout in observed_timeouts] == [45, 35]
+    assert [timeout["write"] for timeout in observed_timeouts] == [45, 35]
+
+
+@pytest.mark.parametrize(
+    "deadline_reserve_seconds",
+    [-1.0, float("nan"), float("inf"), float("-inf"), True, "5", None],
+)
+async def test_complete_rejects_invalid_deadline_reserve_before_network(
+    monkeypatch,
+    deadline_reserve_seconds,
+):
+    settings = settings_with_key(monkeypatch)
+    called = False
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        del request
+        called = True
+        return httpx.Response(200, json={"choices": [{"message": {"content": "late"}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        with pytest.raises(ValueError, match="finite non-negative"):
+            await L2Client(settings, http_client=http_client).complete(
+                messages=[{"role": "user", "content": "질문"}],
+                deadline_reserve_seconds=deadline_reserve_seconds,
+            )
+
+    assert called is False
+
+
 async def test_complete_accumulates_usage_across_generation_steps(monkeypatch):
     settings = settings_with_key(monkeypatch)
     responses = iter(

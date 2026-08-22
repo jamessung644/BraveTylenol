@@ -117,9 +117,9 @@ class Settings(BaseSettings):
         validation_alias="MAX_CONCURRENT_MCP_CALLS",
     )
     max_concurrent_rag_requests: int = Field(
-        default=16,
+        default=4,
         ge=1,
-        le=16,
+        le=4,
         validation_alias="MAX_CONCURRENT_RAG_REQUESTS",
     )
 

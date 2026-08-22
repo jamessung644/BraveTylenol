@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import math
 import re
 from collections.abc import Mapping, Sequence
 from time import perf_counter
@@ -72,6 +73,7 @@ class L2Client:
         tool_choice: str | Mapping[str, Any] | None = None,
         max_tokens: int | None = None,
         attempt_timeout_seconds: float | None = None,
+        deadline_reserve_seconds: float = 0.0,
         allow_blank_recovery: bool = True,
         allow_empty_completion: bool = False,
     ) -> L2Completion:
@@ -104,6 +106,7 @@ class L2Client:
             payload,
             api_key,
             attempt_timeout_seconds=attempt_timeout_seconds,
+            deadline_reserve_seconds=deadline_reserve_seconds,
         )
         try:
             completion = self._parse_completion(
@@ -127,6 +130,7 @@ class L2Client:
                     recovery_payload,
                     api_key,
                     attempt_timeout_seconds=attempt_timeout_seconds,
+                    deadline_reserve_seconds=deadline_reserve_seconds,
                 )
             )
         self.last_usage = _sum_usage(self.last_usage, completion.usage)
@@ -203,6 +207,7 @@ class L2Client:
         api_key: str,
         *,
         attempt_timeout_seconds: float | None = None,
+        deadline_reserve_seconds: float = 0.0,
     ) -> httpx.Response:
         # Re-check at the final network boundary.  Settings.model_copy and
         # dependency injection can bypass startup/config validation in tests or
@@ -211,7 +216,10 @@ class L2Client:
         client = self._client()
 
         for attempt in range(self._settings.retry_attempts + 1):
-            timeout, wall_timeout = self._remaining_timeout(attempt_timeout_seconds)
+            timeout, wall_timeout = self._remaining_timeout(
+                attempt_timeout_seconds,
+                deadline_reserve_seconds=deadline_reserve_seconds,
+            )
             started = perf_counter()
             try:
                 async with asyncio.timeout(wall_timeout):
@@ -278,15 +286,29 @@ class L2Client:
     def _remaining_timeout(
         self,
         attempt_timeout_seconds: float | None = None,
+        *,
+        deadline_reserve_seconds: float = 0.0,
     ) -> tuple[httpx.Timeout, float]:
+        if (
+            isinstance(deadline_reserve_seconds, bool)
+            or not isinstance(deadline_reserve_seconds, (int, float))
+            or not math.isfinite(deadline_reserve_seconds)
+            or deadline_reserve_seconds < 0
+        ):
+            raise ValueError(
+                "deadline_reserve_seconds must be a finite non-negative number"
+            )
         now = perf_counter()
         if self._deadline is None:
             self._deadline = now + self._settings.request_timeout_seconds
         remaining = self._deadline - now
         if remaining <= 0:
             raise UpstreamTimeoutError("L2 request deadline exhausted")
+        usable = remaining - float(deadline_reserve_seconds)
+        if usable <= 0:
+            raise UpstreamTimeoutError("L2 request deadline reserve exhausted")
         attempt_timeout = min(
-            remaining,
+            usable,
             self._settings.model_attempt_timeout_seconds,
             (
                 attempt_timeout_seconds

@@ -49,7 +49,7 @@ mode selection (default hybrid; direct opt-out)
         |
         +-- direct 또는 일반/응급/저위험·안정 정보 --> direct Generation L2 1회 --> L2 text
         |
-        +-- source-dependent --> RAG admission (최대 16)
+        +-- source-dependent --> RAG admission (최대 4)
                                   |
                                   +-- full + source-dependent --> mcp_failure_final L2 1회
                                   +-- full + non-source --> direct L2 1회
@@ -183,14 +183,14 @@ Configured 값은 artifact ceiling과 domain ceiling을 넘지 못하며 `AGENT_
 | model retry | 0 | tail latency 억제 |
 | RAG initial application-tool | 25초 | retrieval query 생성 |
 | forced-tool retry | 10초 | 명시적 source 요청에서 tool call 누락 시 한 번만 재강제 |
-| emergency final | 최대 145초, 최대 2,048 tokens | 검색 전 즉시 행동 답변; 남은 전체 요청 deadline 적용 |
+| emergency final | 명목 최대 145초, 최대 2,048 tokens | safe completion용 35초를 잠근 뒤 남은 network slice 사용 |
 | retrieval hard slice | 최대 45초, 매 단계 동적 재계산 | `min(50초, request × 0.31, 남은 deadline − final reserve)`로 MCP와 planner 격리 |
 | final reserve | 기본 120초 | Retrieval 전 반드시 보존; 짧은 비운영 deadline에서는 request의 75% |
 | retrieval planner L2 | attempt당 25초 | remote call 계획 및 local finalization; 동적 Retrieval 상한 적용 |
-| final Generation | 최대 145초, 최대 2,048 tokens | evidence/no-evidence 뒤 사용자 답변; 남은 전체 요청 deadline 적용 |
-| clean final recovery | 최대 145초, 최대 2,048 tokens | 남은 전체 요청 deadline 안에서 plain text·종료 사유·인용 invariant 재생성 또는 최초 final timeout 복구, 정확히 1회 |
-| safe completion final | 최대 30초, 최대 256 tokens | initial final과 recovery가 모두 실패하고 deadline이 남은 경우 fixed indicator만으로 한국어 1~2문장 생성; tool·retry 없음 |
-| RAG admission | 16 | 공식 C16 cohort를 수용하고 초과 요청은 즉시 하향 |
+| final Generation | 명목 최대 145초, 최대 2,048 tokens | safe completion 30초 + HTTP guard 5초를 먼저 잠가 최초 direct network slice는 최대 130초 |
+| clean final recovery | 명목 최대 145초, 최대 2,048 tokens | 잠근 35초 위의 남은 시간에서만 최대 1회; reserve 소진 시 전송하지 않음 |
+| safe completion final | 최대 30초, 최대 256 tokens | fixed indicator만으로 한국어 1~2문장 생성하고 outer 응답 정리 5초 보존; tool·retry 없음 |
+| RAG admission | 4 (설정 가능 1~4) | slow trajectory 동시 진입 hard limit; C16 direct/final 용량 보존 |
 | MCP call | configured 기본 3, effective ceiling 1~3 | artifact·설정·도메인 중 최솟값으로 tool loop 상한 |
 | model semaphore | 16 | CoEval 동시성에 맞춘 보호 |
 | MCP session semaphore | 16 | connect/discovery/call 전체 점유 제한 |
@@ -200,13 +200,15 @@ forced-tool, planner와 모든 final/recovery 단계는 client 내부 blank-comp
 명시된 phase budget을 넘기지 않는다. Final content가 비어 있거나 application protocol 흔적을
 포함하거나 종료 사유가 `stop`/미지정 이외이거나 인용 계약을 위반하면 frozen inbound에서
 clean final recovery를 정확히 한 번 실행한다. Recovery도 invalid·malformed이거나 timeout이고
-deadline이 남으면 사용자 의료 원문·draft·tool/evidence가 없는 fixed indicator transcript로
+Final과 recovery의 network boundary는 35초 locked reserve를 공통 적용한다. Recovery를 시작할
+여유가 없으면 사용자 의료 원문·draft·tool/evidence가 없는 fixed indicator transcript로
 `safe_completion_final`을 정확히 한 번 실행한다. 이 phase의 호출·출력까지 실패할 때만
 Python 의료 fallback 없이 sanitized upstream error로 종료한다.
 
 MCP transport의 connect/discovery/call이 정지해도 Retrieval 전체 `asyncio.timeout`이 먼저
 취소하고 `retrieval_timeout` no-evidence로 전환한다. Hybrid와 forced RAG admission은 사용
-가능한 permit을 타이머 없이 즉시 획득하고, 16개가 모두 점유된 경우에는 대기하지 않고 하향한다.
+가능한 permit을 타이머 없이 즉시 획득하고, 4개가 모두 점유된 경우에는 waiter를 만들지 않고
+하향한다. 이 상한은 환경 설정으로 높일 수 없다.
 이 둘은 MCP를 무한 대기시키는 것이 아니라
 **MCP 때문에 최종
 L2 응답 기회를 잃지 않도록** first-routing slice와 final-generation slice를 예약하는 방식이다.
@@ -257,8 +259,8 @@ RAG가 시작된 뒤 Retrieval 실패 시 일반 direct prompt로 몰래 전환�
 | Initial final과 clean recovery의 timeout·invalid·malformed | deadline이 남으면 fixed-indicator `safe_completion_final` L2 1회 |
 | `safe_completion_final`도 timeout·invalid·malformed | Python 의료 fallback 없이 세부정보를 숨긴 502/504 |
 | 그 밖의 L2 전송/인증 오류 | Python 의료 fallback 없이 세부정보를 숨긴 upstream error |
-| RAG admission full + source-dependent | 대기하지 않고 fresh `mcp_failure_final` L2 |
-| RAG admission full + non-source | 대기하지 않고 direct L2 |
+| RAG admission hard limit(4) full + source-dependent | waiter/MCP 없이 fresh `mcp_failure_final` L2 |
+| RAG admission hard limit(4) full + non-source | waiter/MCP 없이 direct L2 |
 | MCP timeout/연결 실패 | frozen inbound + failure context의 fresh `mcp_failure_final` L2 |
 | live registry 누락·중복·schema drift | MCP call 없이 retrieval dependency error |
 | 잘못된 tool 이름/인자 | 실행하지 않고 구조화된 protocol error |

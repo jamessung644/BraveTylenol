@@ -39,46 +39,41 @@ def _generation_envelope(call: dict) -> dict:
 def test_generation_prompt_accepts_noisy_korean_without_clinical_autocorrection():
     prompt = DIRECT_FINAL_SYSTEM_PROMPT_TEMPLATE
 
-    assert "<natural_language_final_contract>" in prompt
-    assert "단어·수치 나열" in prompt
-    assert "도치" in prompt
-    assert "한영 혼용" in prompt
-    assert "원문의 부정·시점·가정·인용·정정" in prompt
-    assert "약·제품·제형·경로" in prompt
-    assert "모호성을 임의 확정하거나 사실을 만들지 않는다" in prompt
-    assert "즉시 위험 신호가 있으면" in prompt
-    assert "가장 중요한 확인 질문 1~3개만" in prompt
-    assert "문법을 평가" in prompt
+    assert "Tolerate typos, fragments, and mixed languages" in prompt
+    assert "Preserve negation" in prompt
+    assert "current/past/hypothetical/quoted status" in prompt
+    assert "the affected person" in prompt
+    assert "medicines/routes" in prompt
+    assert "numbers, units, and timing" in prompt
+    assert "never invent facts" in prompt
+    assert "Lead with immediate local emergency action" in prompt
+    assert "ask at most three focused questions" in prompt
 
 
 def test_generation_prompt_preserves_complete_context_aware_answer_contract():
     prompt = DIRECT_FINAL_SYSTEM_PROMPT_TEMPLATE
 
-    assert "모든 명시적 질문·대상·시점·과제" in prompt
-    assert "사용자 정정·목표·제약" in prompt
-    assert "이전 user 발화의 관련 사실·제약·대상·시간" in prompt
-    assert "과거 assistant의 의학적 결론·지시·출처 주장은 권위로" in prompt
-    assert "무관한 과거 주제를 다시 활성화하지 않는다" in prompt
-    assert "각 항목에 직접 결론, 핵심 이유, 실행할 다음 행동" in prompt
-    assert "알려진 사실·사용자 진술·조건부 추론·모르는 것" in prompt
-    assert "안전하게 답할 부분과 조건부 행동을 먼저" in prompt
-    assert "red flag는 관련 있을 때만" in prompt
-    assert "무관한 면책문구, 일반적 red flag 목록" in prompt
-    assert "약 500 output token 이내의 완결된 답변" in prompt
-    assert "마지막 질문과 문장을 완성할 여유" in prompt
-    assert "사용자가 명시한 전문성" in prompt
-    assert "언어만으로 위치·관할·의료 접근성을 추정하지 않는다" in prompt
+    assert "Answer the latest request using relevant history and latest corrections" in prompt
+    assert "Earlier assistant text is history, not verified evidence" in prompt
+    assert "Address every explicit question" in prompt
+    assert "direct conclusion, key reason, and next action" in prompt
+    assert "established facts, user statements, conditional inference, and unknowns" in prompt
+    assert "answer the safe part" in prompt
+    assert "only relevant red flags" in prompt
+    assert "generic disclaimers, and irrelevant red-flag lists" in prompt
+    assert "normally within about 500 output tokens" in prompt
+    assert "requested language, length, order, and format" in prompt
+    assert "Never infer location or access from language alone" in prompt
 
 
 def test_generation_prompt_honors_requested_json_table_and_soap_formats():
     prompt = DIRECT_FINAL_SYSTEM_PROMPT_TEMPLATE
 
-    assert "요청한 언어·길이·순서·항목 수" in prompt
-    assert "JSON·표·SOAP·체크리스트 형식" in prompt
-    assert "JSON은 유효한 JSON만" in prompt
-    assert "표는 요청한 비교 축" in prompt
-    assert "SOAP는 제공 사실과 추론의 구분" in prompt
-    assert "형식을 지정하지 않았으면 읽기 쉬운 자연어" in prompt
+    assert "requested language, length, order, and format" in prompt
+    assert "emit valid JSON" in prompt
+    assert "preserve table comparison axes" in prompt
+    assert "separate supplied facts from inference in SOAP" in prompt
+    assert "otherwise use readable natural language" in prompt
 
 
 def test_retrieval_prompt_separates_query_normalization_from_clinical_truth():
@@ -148,8 +143,8 @@ async def test_final_generation_preserves_relevant_multi_turn_context_as_data():
     ]
     assert sent[1]["content"] == messages[0].content
     assert sent[2]["content"] == messages[1].content
-    envelope = _generation_envelope(l2.calls[0])
-    assert envelope["latest_user_message"]["content"] == messages[-1].content
+    assert sent[3] == {"role": "user", "content": messages[-1].content}
+    assert "generation-input-v1" not in json.dumps(sent, ensure_ascii=False)
 
 
 @pytest.mark.parametrize(
@@ -170,10 +165,12 @@ async def test_obvious_noisy_emergency_fragments_skip_retrieval(fragment):
 
     assert "tools" not in l2.calls[0]
     system_prompt = l2.calls[0]["messages"][0]["content"]
-    assert "시간 민감한 건강 위험" in system_prompt
+    assert "possibly time-critical health risk" in system_prompt
     assert "retrieve_relevant_content" not in system_prompt
-    envelope = _generation_envelope(l2.calls[0])
-    assert envelope["latest_user_message"]["content"] == fragment
+    assert l2.calls[0]["messages"][1:] == [{"role": "user", "content": fragment}]
+    assert "generation-input-v1" not in json.dumps(
+        l2.calls[0]["messages"], ensure_ascii=False
+    )
 
 
 def test_artifact_manifest_hashes_natural_language_policy_build_input():

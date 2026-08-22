@@ -41,6 +41,10 @@ _FINAL_GENERATION_TIMEOUT_SECONDS = 145.0
 _RECOVERY_TIMEOUT_SECONDS = 145.0
 _EMERGENCY_TIMEOUT_SECONDS = 145.0
 _SAFE_COMPLETION_TIMEOUT_SECONDS = 30.0
+_SAFE_COMPLETION_HTTP_GUARD_SECONDS = 5.0
+_SAFE_COMPLETION_RESERVE_SECONDS = (
+    _SAFE_COMPLETION_TIMEOUT_SECONDS + _SAFE_COMPLETION_HTTP_GUARD_SECONDS
+)
 _FINAL_MAX_TOKENS = 2_048
 _EMERGENCY_MAX_TOKENS = 2_048
 _SAFE_COMPLETION_MAX_TOKENS = 256
@@ -49,6 +53,7 @@ _SAFE_COMPLETION_MAX_TOKENS = 256
 # being structurally more likely to truncate than the draft it replaces.
 _RECOVERY_MAX_TOKENS = _FINAL_MAX_TOKENS
 _FINAL_PHASES = ("direct", "post_retrieval", "mcp_failure", "emergency")
+_COMPACT_RAW_FINAL_PHASES = frozenset({"direct", "emergency"})
 FinalPhase = Literal["direct", "post_retrieval", "mcp_failure", "emergency"]
 SafeCompletionPhase = Literal["normal", "emergency"]
 _PROTOCOL_FUNCTION_NAMES = frozenset(
@@ -210,7 +215,9 @@ class GenerationEngine:
     ) -> str:
         """Generate and validate a final answer, with one clean bounded retry.
 
-        Both attempts are rebuilt from the frozen inbound messages and trusted phase
+        Direct and emergency initial attempts use a compact raw-chat transcript;
+        evidence-bearing phases and every recovery use the structured envelope.
+        Every attempt is rebuilt from the frozen inbound messages and trusted phase
         context. The evidence-decision transcript and an invalid draft are never
         copied into either final transcript.
         """
@@ -222,11 +229,17 @@ class GenerationEngine:
             retrieval=retrieval,
             failure_reason=failure_reason,
         )
-        initial_conversation = _medical_conversation(
-            messages,
-            system_prompt=_final_system_prompt(phase),
-            final_phase_context=final_context,
-        )
+        if phase in _COMPACT_RAW_FINAL_PHASES:
+            initial_conversation = _compact_final_conversation(
+                messages,
+                system_prompt=_final_system_prompt(phase),
+            )
+        else:
+            initial_conversation = _medical_conversation(
+                messages,
+                system_prompt=_final_system_prompt(phase),
+                final_phase_context=final_context,
+            )
         timeout = (
             _EMERGENCY_TIMEOUT_SECONDS
             if phase == "emergency"
@@ -239,6 +252,7 @@ class GenerationEngine:
             completion = await self._l2.complete(
                 messages=initial_conversation,
                 attempt_timeout_seconds=timeout,
+                deadline_reserve_seconds=_SAFE_COMPLETION_RESERVE_SECONDS,
                 max_tokens=final_max_tokens,
                 allow_blank_recovery=False,
                 allow_empty_completion=True,
@@ -275,6 +289,7 @@ class GenerationEngine:
             recovered = await self._l2.complete(
                 messages=recovery_conversation,
                 attempt_timeout_seconds=_RECOVERY_TIMEOUT_SECONDS,
+                deadline_reserve_seconds=_SAFE_COMPLETION_RESERVE_SECONDS,
                 max_tokens=_RECOVERY_MAX_TOKENS,
                 allow_blank_recovery=False,
                 allow_empty_completion=False,
@@ -329,6 +344,7 @@ class GenerationEngine:
         completion = await self._l2.complete(
             messages=_safe_completion_conversation(safe_phase),
             attempt_timeout_seconds=_SAFE_COMPLETION_TIMEOUT_SECONDS,
+            deadline_reserve_seconds=_SAFE_COMPLETION_HTTP_GUARD_SECONDS,
             max_tokens=_SAFE_COMPLETION_MAX_TOKENS,
             allow_blank_recovery=False,
             allow_empty_completion=False,
@@ -342,6 +358,32 @@ class GenerationEngine:
             )
             raise MalformedUpstreamResponseError("L2 safe completion was invalid")
         return completion.content or ""  # nonempty is established above
+
+
+def _compact_final_conversation(
+    messages: Sequence[ChatMessage],
+    *,
+    system_prompt: str,
+) -> list[dict[str, str]]:
+    """Build the minimal no-tool transcript without widening caller authority."""
+
+    if not messages or messages[-1].role != "user" or messages[-1].content is None:
+        raise MalformedUpstreamResponseError("Generation requires a latest user message")
+    conversation = [{"role": "system", "content": system_prompt}]
+    for message in messages:
+        if (
+            message.role not in {"user", "assistant"}
+            or message.content is None
+            or message.tool_calls
+            or message.tool_call_id is not None
+        ):
+            raise MalformedUpstreamResponseError(
+                "Compact final generation accepts text dialogue only"
+            )
+        # Only role and exact text cross this boundary. Caller-supplied names and
+        # extension fields are not part of the clinical conversation or authority.
+        conversation.append({"role": message.role, "content": message.content})
+    return conversation
 
 
 def _medical_conversation(
@@ -1572,7 +1614,7 @@ def _safe_completion_permitted(l2_client: Any) -> bool:
         seconds = float(remaining())
     except (TypeError, ValueError):
         return False
-    return seconds > 0.0
+    return seconds > _SAFE_COMPLETION_HTTP_GUARD_SECONDS
 
 
 def _safe_completion_violations(

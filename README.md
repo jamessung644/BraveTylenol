@@ -61,8 +61,9 @@ context로 downgrade된다. Client가 보낸 tool/function protocol field와 too
 대화의 키워드가 현재 질문을 불필요하게 RAG로 보내지 않게 한다.
 
 기본값은 `AGENT_MODE=hybrid`이며 위 source-dependent routing을 활성화한다.
-`AGENT_MODE=direct`는 MCP를 완전히 끄는 비교·복구 variant다. Hybrid와 forced RAG 모두 admission 16개가 이미
-사용 중이면 대기열에서 최종 답변 시간을 소모하지 않는다. source-dependent 요청은 fresh
+`AGENT_MODE=direct`는 MCP를 완전히 끄는 비교·복구 variant다. Hybrid와 forced RAG 모두 admission 4개가 이미
+사용 중이면 대기열을 만들지 않고 즉시 분기한다. 이 값은 환경 설정으로 낮출 수 있지만 4보다
+높일 수 없다. source-dependent 요청은 fresh
 `mcp_failure_final`로, 그 밖의 요청은 direct L2로 전환한다. `AGENT_MODE=rag`는 모든 정상
 질문에 Retrieval 도구를 노출하는 진단용, `AGENT_MODE=passthrough`는 검색 조정 없이 안전
 system prompt를 붙이는 진단용이다.
@@ -76,14 +77,14 @@ system prompt를 붙이는 진단용이다.
 | L2 retry | 0회 | 재시도 꼬리 지연 제거 |
 | RAG initial application-tool | 25초 | retrieval query 생성 단계 |
 | forced-tool retry | 10초 | source-dependent 요청에서 tool call 누락 시 한 번만 강제 |
-| emergency final | 최대 145초, 최대 2,048 tokens | deterministic guard가 선택한 fresh no-tool 최종 단계; 남은 전체 요청 deadline 적용 |
+| emergency final | 명목 최대 145초, 최대 2,048 tokens | 실제 network slice는 safe completion용 35초를 먼저 잠근 뒤 남은 시간으로 제한 |
 | Retrieval hard slice | 최대 45초, 매 단계 동적 재계산 | `min(50초, request × 0.31, 남은 deadline − final reserve)`로 MCP와 planner 격리 |
 | final reserve | 기본 120초 | Retrieval 시작 전에 반드시 남겨 두며, 짧은 비운영 deadline에서는 request의 75%로 축소 |
 | Retrieval planner L2 | attempt당 25초 | MCP call 계획과 local finalization 단계; 동적 Retrieval 상한 안에서 동작 |
-| final Generation | 최대 145초, 최대 2,048 tokens | evidence/no-evidence 이후 사용자 답변; 남은 전체 요청 deadline 적용 |
-| clean final recovery | 최대 145초, 최대 2,048 tokens | final 검증 실패 또는 최초 final timeout 시 남은 전체 요청 deadline 안의 fresh no-tool 재작성 |
-| safe completion final | 최대 30초, 최대 256 tokens | initial final과 clean recovery가 모두 실패하고 deadline이 남은 경우 fixed indicator만으로 생성하는 L2 한국어 안전 고지; tool·retry 없음 |
-| RAG admission | 16개 | 공식 C16 cohort를 수용하고 초과 요청은 즉시 하향 |
+| final Generation | 명목 최대 145초, 최대 2,048 tokens | 각 network 호출은 safe completion 30초 + HTTP guard 5초를 잠그므로 최초 direct는 최대 130초 |
+| clean final recovery | 명목 최대 145초, 최대 2,048 tokens | 잠근 35초를 침범하지 않을 때만 fresh no-tool 재작성; 시간이 없으면 network 호출 없이 safe completion으로 진행 |
+| safe completion final | 최대 30초, 최대 256 tokens | fixed indicator만으로 생성하는 L2 한국어 안전 고지; 마지막 HTTP 정리 5초 보존, tool·retry 없음 |
+| RAG admission | 4개 (설정 가능 1~4) | slow multi-call 경로가 C16 direct/final 용량을 독점하지 못하도록 제한 |
 | MCP remote call | 기본 3회, release ceiling 3회 | 실제 호출은 도메인 ceiling 1~3회로 제한 |
 | L2 동시 호출 | 16개 | CoEval 동시성에 맞춘 upstream 보호 |
 | MCP 동시 연결 | 16개 | connection/session 점유 제한 |

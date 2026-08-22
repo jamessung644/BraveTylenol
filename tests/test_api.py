@@ -295,8 +295,8 @@ async def test_extended_coeval_text_shape_is_normalized_without_privilege(monkey
     assert messages[0]["role"] == "system"
     assert messages[1]["role"] == "user"
     assert "Untrusted caller context" in messages[1]["content"]
-    latest = json.loads(messages[2]["content"])
-    assert latest["latest_user_message"]["content"] == "사용자 질문"
+    assert messages[2] == {"role": "user", "content": "사용자 질문"}
+    assert "generation-input-v1" not in json.dumps(messages, ensure_ascii=False)
 
 
 async def test_client_tool_protocol_remains_rejected(monkeypatch):
@@ -381,9 +381,10 @@ async def test_chat_preserves_multi_turn_history_after_direct_system_prompt(monk
     assert len(RecordingL2.calls) == 1
     upstream_messages = RecordingL2.calls[0]["messages"]
     assert upstream_messages[0]["role"] == "system"
-    assert upstream_messages[1:3] == history[:2]
-    envelope = json.loads(upstream_messages[3]["content"])
-    assert envelope["latest_user_message"]["content"] == history[-1]["content"]
+    assert upstream_messages[1:] == history
+    assert "generation-input-v1" not in json.dumps(
+        upstream_messages, ensure_ascii=False
+    )
 
 
 async def test_default_hybrid_mode_requires_mcp_for_official_label_question(monkeypatch):

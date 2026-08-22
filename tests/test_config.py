@@ -121,7 +121,14 @@ def test_container_defaults_to_bounded_hybrid_mode(monkeypatch):
     assert settings.max_mcp_calls == 3
     assert settings.max_concurrent_model_calls == 16
     assert settings.max_concurrent_mcp_calls == 16
-    assert settings.max_concurrent_rag_requests == 16
+    assert settings.max_concurrent_rag_requests == 4
+
+
+def test_rag_admission_limit_cannot_exceed_direct_capacity_reserve(monkeypatch):
+    monkeypatch.setenv("MAX_CONCURRENT_RAG_REQUESTS", "5")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
 
 
 def test_legacy_baseline_environment_names_remain_supported(monkeypatch):
