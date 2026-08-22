@@ -1,50 +1,117 @@
-# BraveTylenol bounded-L2 submission
+<p align="center">
+  <img src="assets/brand/brave-tylenol-logo.png" width="320" alt="Brave Tylenol medical capsule character">
+</p>
 
-CoEval의 OpenAI-compatible 요청을 받아 `Lunit/L2-preview`가 최종 답변을 생성하는
-해커톤 제출 서버입니다. 정적 의료 답변이나 외부 인터넷 API를 사용하지 않으며,
-L2 생성이 실패하면 CoEval이 재시도할 수 있도록 명시적인 오류를 반환합니다.
+<h1 align="center">Brave Tylenol</h1>
 
-## 평가 환경 계약
+<p align="center">
+  <strong>Lunit L2와 제한적 의료 RAG를 결합한 멀티턴 건강관리 챗봇</strong><br>
+  의료 답변의 품질, 안전성, 평가 환경 안정성을 함께 최적화한 HealthBench 하네스 엔지니어링 프로젝트
+</p>
 
-- 저장소 루트의 `Dockerfile`로 실행
-- `0.0.0.0:8000`에서 수신
-- `GET /health`, `GET /healthz`, `GET /v1/models`
-- `POST /v1/chat/completions`
-- 제출 model name: `team-chatbot`
-- `lunit_...` 형식의 `LUNIT_FM_API_KEY`가 유효한 요청 Bearer보다 우선
-- 일반 요청은 L2 1회이며 서버 내부 재시도 없음
-- KCD, 의약품, HIRA, 법률, 진료지침, PubMed 근거가 명시적으로 필요한 경우에만
-  MCP tool을 최대 1회 호출하며, 4초 안에 실패하면 즉시 직접 L2 경로로 진행
-- upstream timeout 145초, 요청 전체 deadline 150초, queue wait 최대 5초
-- completion budget 최대 4,096 token, `reasoning_effort=low`, `temperature=0`
-- L2 outbound 동시 실행은 공식 CoEval 동시성과 같은 16개로 제한
-- 응답 본문은 4MB로 제한하며 slow body도 전체 deadline을 넘길 수 없음
-- L2 timeout, HTTP 오류, 빈 응답, 잘못된 JSON은 정적 답변으로 숨기지 않고
-  OpenAI 형태의 HTTP 424 오류로 반환
-- 잘못된 messages는 HTTP 400으로 반환
-- 모든 지원 응답에는 `X-Request-ID`를 부여하고 SIGTERM으로 정상 종료
-- Python 표준 라이브러리만 사용하며 빌드 중 `pip install` 없음
+## 프로젝트 소개
 
-## 답변 품질 전략
+Brave Tylenol은 일반 사용자의 건강 질문에 정확하고 맥락에 맞게 답하도록 설계한
+OpenAI-compatible 의료 챗봇 서버입니다. 대회에서 제공한 의과학 파운데이션 모델
+`Lunit/L2-preview`가 모든 최종 답변을 생성하며, 정확한 근거가 필요한 질문에만 공식
+MCP 의료 데이터 소스를 제한적으로 조회합니다.
 
-- 전체 대화와 evaluator system context를 보존
-- 사용자 언어를 동적으로 재확인하되 명시적 언어 요청을 우선
-- 환자, 임상의, 데이터 계산, 의료 문서 작성 요청을 구분
-- 응급/당일/외래/자가관리 단계와 특수집단 위험을 문맥에 맞게 적용
-- 정확한 항목 수, heading, schema, 길이와 제공 사실만 사용하라는 지시를 재확인
-- 약 이름·제형·현재 계획이 없을 때 새 용량이나 복용 시점을 임의로 생성하지 않음
-- 최종 사용자 답변은 항상 L2가 작성
-- 검색 결과는 최대 3,000자로 제한하고 비신뢰 데이터로 취급
-- 일반 질문은 RAG 비용을 전혀 지불하지 않는 direct-first 구조
-- 복잡한 질문도 두 번째 L2를 호출하지 않음
+이 프로젝트의 핵심은 새로운 모델을 학습하는 것이 아니라, 제한된 평가 시간과 격리된
+실행 환경 안에서 L2가 안정적으로 좋은 답을 만들도록 **대화 보존, 의료 안전 프롬프트,
+선택적 검색, 토큰 예산, 동시성, 오류 계약**을 설계한 것입니다.
 
-## 실행
+## 참가 대회
 
-```bash
-python main.py serve
+<p align="center">
+  <a href="https://www.lunit.io/">
+    <img src="assets/brand/lunit-logo.svg" height="45" alt="Lunit logo">
+  </a>
+</p>
+
+| 항목 | 내용 |
+| --- | --- |
+| 대회 | [Conquer Health: 의과학 특화 파운데이션 모델 해커톤](https://www.rndcircle.io/corp-lunit-collabo) |
+| 일정 | 2026년 8월 21일–22일, 1박 2일 오프라인 |
+| 장소 | 루닛 오피스, 서울 강남구 강남대로 374 |
+| 과제 | 의과학 FM과 의료 RAG 자원을 활용한 대국민 건강관리 챗봇 개발 |
+| 평가 | CoEval 기반 멀티턴 대화 및 HealthBench 지표 |
+| 제공 자원 | Lunit L2, PubMed·의약품·건강보험·법률·임상 가이드라인 데이터, MCP 도구, OpenAI Codex |
+
+공식 안내에 따르면 이 대회는 루닛이 이끄는 정부 지원 특화 파운데이션 모델 국가 과제에서
+개발된 의과학 FM과 의료 RAG 자원을 실제 서비스 형태로 조합하는 것을 목표로 합니다.
+Brave Tylenol은 이 과제에 제출한 팀 프로젝트입니다.
+
+> **브랜드 안내:** Lunit 명칭과 로고는 대회 주최 및 참가 이력을 식별하기 위해 표시했습니다.
+> Brave Tylenol은 해커톤 참가 프로젝트이며, 루닛의 공식 제품이나 의료기기가 아닙니다.
+> 로고 출처: [Lunit Media Center](https://www.lunit.io/en/media-center/).
+
+## 구현 결과
+
+- CoEval이 호출할 수 있는 `GET /v1/models`, `POST /v1/chat/completions` 구현
+- 최대 3턴의 전체 대화와 evaluator system context를 손실 없이 L2에 전달
+- 환자·보호자, 임상의, 데이터 분석, 의료 문서 작성 요청을 구분하는 시스템 프롬프트 설계
+- 응급도, 특수집단, 약물 안전성, 불확실성, 출력 형식을 함께 고려하는 답변 정책 적용
+- 근거가 명시적으로 필요한 질문에만 MCP를 최대 1회 호출하는 direct-first 구조
+- MCP가 4초 안에 응답하지 않으면 검색 없이 L2로 진행하는 bounded fallback
+- 요청당 L2 생성 1회, 150초 전체 deadline, 최대 16개 동시 요청으로 평가 시간 제어
+- Docker 단일 이미지와 비루트 사용자로 격리 평가 환경 재현
+- L2 오류·빈 응답·잘못된 입력을 OpenAI-compatible HTTP 오류로 명시적으로 반환
+
+## 동작 구조
+
+```mermaid
+flowchart LR
+    A[CoEval / 사용자 대화] --> B[OpenAI-compatible API]
+    B --> C{정확한 외부 근거가 필요한가?}
+    C -- 아니요 --> E[Lunit L2 단일 생성]
+    C -- 예 --> D[공식 MCP 1회 조회<br/>4초 제한]
+    D --> E
+    D -. 실패 시 direct fallback .-> E
+    E --> F[assistant 응답]
 ```
 
-로컬에서는 실제 키를 소스에 추가하지 말고 프로세스 환경에 주입합니다.
+검색을 무조건 수행하지 않는 이유는 의료 RAG가 항상 품질을 높이지는 않기 때문입니다.
+불필요한 검색은 잘못된 근거, 긴 컨텍스트, 추가 지연을 만들 수 있습니다. 따라서 약품 허가,
+HIRA 기준, 법률, 임상 가이드라인, PubMed 근거처럼 **최신·정확한 출처 확인의 가치가 큰
+질문만 검색**하고, 나머지는 L2가 대화 맥락에 집중하도록 구성했습니다.
+
+## 검증 기록
+
+| 검증 | 결과 |
+| --- | ---: |
+| 개발 대시보드 최고 확인 점수 | **49.80** |
+| 해당 평가 SHA | `830864b13705dad8f28ae9c2513bd55ed3c980a6` |
+| 16개 동시 L2 요청 로컬 통합 검증 | 16/16 HTTP 200 |
+| 로컬 통합 검증 중앙 지연시간 | 25.965초 |
+| 정적 의료 답변 fallback | 0건 |
+
+49.80은 개발 중 대회 검증 대시보드에서 확인한 HealthBench 기반 점수이며, 수상이나 공식
+최종 순위를 의미하지 않습니다. 로컬 수치는
+[L2 인증 성능 게이트 기록](docs/benchmarks/2026-08-21-l2-auth-local.md)의 실제 L2 호출 결과입니다.
+
+## 주요 기술적 의사결정
+
+| 문제 | 선택 | 이유 |
+| --- | --- | --- |
+| 모델 품질 | 최종 답변은 항상 L2가 작성 | 정적 규칙·작은 모델 대체로 인한 의료 답변 품질 저하 방지 |
+| 검색 지연 | direct-first, MCP 최대 1회 | 제한된 평가 시간 안에서 근거 가치가 큰 질문에만 비용 사용 |
+| 긴 대화 | 전체 history 보존 | 후속 질문의 지시 대상, 약물, 검사, 시간축을 유지 |
+| 출력 일관성 | 단일 의료 시스템 프롬프트 | 턴마다 안전성·형식·대상 독자를 일관되게 적용 |
+| 장애 처리 | 명시적 4xx/424 오류 | 가짜 성공이나 정적 답변으로 평가 오류를 숨기지 않음 |
+| 제출 재현성 | zero-dependency 런타임 Docker | 빌드 시간과 패키지 설치 장애를 줄임 |
+
+## API 계약
+
+| Method | Endpoint | 설명 |
+| --- | --- | --- |
+| `GET` | `/health`, `/healthz` | 컨테이너 상태 확인 |
+| `GET` | `/v1/models` | 평가 모델 `team-chatbot` 반환 |
+| `POST` | `/v1/chat/completions` | OpenAI-compatible 멀티턴 답변 생성 |
+
+## 로컬 실행
+
+Python 3.13 이상에서 실행할 수 있습니다. API 키는 소스나 Git에 넣지 말고 런타임 환경
+변수로 주입하는 방식을 권장합니다.
 
 ```bash
 export LUNIT_FM_API_KEY="lunit_..."
@@ -56,8 +123,17 @@ curl --max-time 2 http://127.0.0.1:8000/health
 curl --max-time 2 http://127.0.0.1:8000/v1/models
 curl --max-time 160 \
   -H 'Content-Type: application/json' \
-  -d '{"model":"team-chatbot","messages":[{"role":"user","content":"What should I do?"}]}' \
+  -d '{"model":"team-chatbot","messages":[{"role":"user","content":"복용 중인 약과 두통이 관련 있을까요?"}]}' \
   http://127.0.0.1:8000/v1/chat/completions
+```
+
+Docker로 평가 환경을 재현할 수 있습니다.
+
+```bash
+docker build -t brave-tylenol .
+docker run --rm -p 8000:8000 \
+  -e LUNIT_FM_API_KEY="$LUNIT_FM_API_KEY" \
+  brave-tylenol
 ```
 
 ## 테스트
@@ -67,18 +143,26 @@ python -m pytest -q
 python -m ruff check .
 ```
 
-Docker가 있는 환경에서는 실제 제출 이미지로 확인합니다.
+## 저장소 구성
 
-```bash
-docker build -t brave-tylenol-submission .
-docker run --rm -p 8000:8000 brave-tylenol-submission
+```text
+.
+├── main.py                         # 실제 제출용 OpenAI-compatible 서버
+├── Dockerfile                      # 격리 평가용 최소 런타임 이미지
+├── tests/                          # API·L2·MCP·오케스트레이션 회귀 테스트
+├── docs/                           # 아키텍처와 성능 검증 기록
+└── assets/brand/                   # Brave Tylenol 및 Lunit 브랜드 자산
 ```
 
-## 시간 목표와 제한
+## 포트폴리오 핵심 요약
 
-공식 전체 평가 시간에는 답변 생성뿐 아니라 rubric judging도 포함되므로 로컬 서버가
-전체 시간을 단독으로 보장할 수는 없습니다. 서버 내부 재시도를 제거하고 동시성을
-16으로 제한해 중복 호출과 과부하를 막았습니다. 선택적 RAG는 최대 4초로
-제한하고 모든 요청의 L2 생성을 1회로 제한해 30분 목표에 맞췄습니다.
-제출 전에는 실제 Docker 이미지로 health, models, chat completion 및 동시 요청을
-확인해야 합니다.
+- **문제 정의:** 의료 답변 품질을 유지하면서 30분 안팎의 전체 평가 시간을 맞추는 하네스 설계
+- **핵심 기여:** 멀티턴 문맥 보존, 의료 안전 프롬프트, 선택적 MCP, 단일 L2 호출, Docker 평가 계약
+- **검증 방식:** HealthBench 기반 대회 대시보드와 16-way concurrent 실제 L2 통합 테스트
+- **배운 점:** 의료 RAG는 호출 수보다 라우팅 품질이 중요하며, 모델 교체보다 입력 컨텍스트와
+  실행 예산을 제어하는 것이 정확도·지연시간 균형에 더 큰 영향을 줄 수 있음
+
+## 면책
+
+이 저장소는 해커톤에서 제작한 연구·시연용 프로토타입입니다. 실제 진단, 처방 또는 응급의료
+판단을 대신하지 않으며 임상 환경에 배포하기 전 별도의 의료·법률·보안 검증이 필요합니다.
