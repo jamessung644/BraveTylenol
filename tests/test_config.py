@@ -1,3 +1,7 @@
+import pytest
+from pydantic import ValidationError
+
+import lunit_hackathon.submission_credential as submission_credential
 from lunit_hackathon.config import Settings
 
 
@@ -37,6 +41,45 @@ def test_example_placeholders_are_not_treated_as_credentials(tmp_path, monkeypat
     assert Settings(_env_file=dotenv).api_key is None
 
 
+def test_embedded_main_credential_is_explicitly_gated(monkeypatch):
+    calls = []
+
+    def fake_import(name):
+        calls.append(name)
+        return type("FakeMain", (), {"EMBEDDED_LUNIT_API_KEY": "lunit_test_embedded"})
+
+    monkeypatch.delenv("LUNIT_FM_API_KEY", raising=False)
+    monkeypatch.delenv("SUBMISSION_CREDENTIAL_SOURCE", raising=False)
+    monkeypatch.setattr(submission_credential, "import_module", fake_import)
+
+    ordinary = Settings(_env_file=None)
+    packaged = Settings(
+        _env_file=None,
+        SUBMISSION_CREDENTIAL_SOURCE="main",
+    )
+
+    assert ordinary.embedded_api_key is None
+    assert calls == []
+    assert packaged.embedded_api_key == "lunit_test_embedded"
+    assert calls == ["main"]
+    assert "lunit_test_embedded" not in repr(packaged)
+
+
+def test_non_string_embedded_main_credential_is_unavailable(monkeypatch):
+    monkeypatch.delenv("LUNIT_FM_API_KEY", raising=False)
+    monkeypatch.setattr(
+        submission_credential,
+        "import_module",
+        lambda name: type("FakeMain", (), {"EMBEDDED_LUNIT_API_KEY": object()}),
+    )
+    settings = Settings(
+        _env_file=None,
+        SUBMISSION_CREDENTIAL_SOURCE="main",
+    )
+
+    assert settings.embedded_api_key is None
+
+
 def test_latency_controls_have_safe_defaults(monkeypatch):
     monkeypatch.delenv("MAX_COMPLETION_TOKENS", raising=False)
     monkeypatch.delenv("LUNIT_REASONING_EFFORT", raising=False)
@@ -46,19 +89,46 @@ def test_latency_controls_have_safe_defaults(monkeypatch):
 
     settings = Settings(_env_file=None)
 
-    assert settings.request_timeout_seconds == 65
-    assert settings.max_completion_tokens == 1024
+    assert settings.request_timeout_seconds == 165
+    assert settings.model_attempt_timeout_seconds == 145
+    assert settings.max_completion_tokens == 2048
     assert settings.reasoning_effort == "low"
-    assert settings.retry_attempts == 1
-    assert settings.agent_mode == "direct"
+    assert settings.retry_attempts == 0
+    assert settings.agent_mode == "hybrid"
 
 
-def test_container_defaults_to_one_call_direct_mode(monkeypatch):
+def test_release_configuration_rejects_transport_retries(monkeypatch):
+    monkeypatch.setenv("L2_RETRY_ATTEMPTS", "1")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_container_defaults_to_bounded_hybrid_mode(monkeypatch):
+    monkeypatch.delenv("AGENT_MODE", raising=False)
+    monkeypatch.delenv("HARNESS_MODE", raising=False)
     monkeypatch.delenv("LUNIT_MCP_URL", raising=False)
+    monkeypatch.delenv("MAX_MCP_CALLS", raising=False)
+    monkeypatch.delenv("MAX_TOOL_CALLS", raising=False)
+    monkeypatch.delenv("MAX_CONCURRENT_MODEL_CALLS", raising=False)
+    monkeypatch.delenv("MAX_CONCURRENT_MCP_CALLS", raising=False)
+    monkeypatch.delenv("MAX_CONCURRENT_RAG_REQUESTS", raising=False)
 
     settings = Settings(_env_file=None)
 
-    assert settings.mcp_url is None
+    assert settings.agent_mode == "hybrid"
+    assert settings.mcp_url == "https://mcp.hackathon.lunit.io/mcp"
+    assert settings.max_mcp_calls == 3
+    assert settings.max_concurrent_model_calls == 16
+    assert settings.max_concurrent_mcp_calls == 16
+    assert settings.max_concurrent_rag_requests == 4
+
+
+def test_rag_admission_limit_cannot_exceed_direct_capacity_reserve(monkeypatch):
+    monkeypatch.setenv("MAX_CONCURRENT_RAG_REQUESTS", "5")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
 
 
 def test_legacy_baseline_environment_names_remain_supported(monkeypatch):

@@ -3,6 +3,8 @@ from typing import Any, Literal
 from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from lunit_hackathon.submission_credential import embedded_main_api_key
+
 _PLACEHOLDERS = {"", "여기에_직접_입력", "lunit_replace_me"}
 
 
@@ -24,6 +26,10 @@ class Settings(BaseSettings):
         default=None,
         validation_alias="LUNIT_FM_API_KEY",
     )
+    submission_credential_source: Literal["none", "main"] = Field(
+        default="none",
+        validation_alias="SUBMISSION_CREDENTIAL_SOURCE",
+    )
     lunit_fm_model: str = Field(
         default="Lunit/L2-preview",
         validation_alias="LUNIT_FM_MODEL",
@@ -38,7 +44,7 @@ class Settings(BaseSettings):
     )
 
     request_timeout_seconds: float = Field(
-        default=65.0,
+        default=165.0,
         gt=0,
         le=175,
         validation_alias=AliasChoices(
@@ -46,14 +52,20 @@ class Settings(BaseSettings):
             "UPSTREAM_TIMEOUT_SECONDS",
         ),
     )
+    model_attempt_timeout_seconds: float = Field(
+        default=145.0,
+        gt=0,
+        le=145,
+        validation_alias="MODEL_ATTEMPT_TIMEOUT_SECONDS",
+    )
     retry_attempts: int = Field(
-        default=1,
+        default=0,
         ge=0,
-        le=3,
+        le=0,
         validation_alias="L2_RETRY_ATTEMPTS",
     )
     max_completion_tokens: int = Field(
-        default=1_024,
+        default=2_048,
         ge=512,
         le=6_144,
         validation_alias="MAX_COMPLETION_TOKENS",
@@ -62,28 +74,28 @@ class Settings(BaseSettings):
         default="low",
         validation_alias="LUNIT_REASONING_EFFORT",
     )
-    agent_mode: Literal["direct", "rag", "passthrough"] = Field(
-        default="direct",
+    agent_mode: Literal["direct", "hybrid", "rag", "passthrough"] = Field(
+        default="hybrid",
         validation_alias=AliasChoices("AGENT_MODE", "HARNESS_MODE"),
     )
     mcp_url: str | None = Field(
-        default=None,
+        default="https://mcp.hackathon.lunit.io/mcp",
         validation_alias="LUNIT_MCP_URL",
     )
     max_mcp_calls: int = Field(
-        default=4,
+        default=3,
         ge=0,
         le=12,
         validation_alias=AliasChoices("MAX_MCP_CALLS", "MAX_TOOL_CALLS"),
     )
     max_tool_result_chars: int = Field(
-        default=12_000,
+        default=8_000,
         ge=1_000,
         le=100_000,
         validation_alias="MAX_TOOL_RESULT_CHARS",
     )
     max_evidence_chars: int = Field(
-        default=32_000,
+        default=12_000,
         ge=2_000,
         le=200_000,
         validation_alias="MAX_EVIDENCE_CHARS",
@@ -91,6 +103,24 @@ class Settings(BaseSettings):
     log_level: str = Field(
         default="INFO",
         validation_alias=AliasChoices("LOG_LEVEL", "HARNESS_LOG_LEVEL"),
+    )
+    max_concurrent_model_calls: int = Field(
+        default=16,
+        ge=1,
+        le=64,
+        validation_alias="MAX_CONCURRENT_MODEL_CALLS",
+    )
+    max_concurrent_mcp_calls: int = Field(
+        default=16,
+        ge=1,
+        le=64,
+        validation_alias="MAX_CONCURRENT_MCP_CALLS",
+    )
+    max_concurrent_rag_requests: int = Field(
+        default=4,
+        ge=1,
+        le=4,
+        validation_alias="MAX_CONCURRENT_RAG_REQUESTS",
     )
 
     @field_validator(
@@ -108,6 +138,10 @@ class Settings(BaseSettings):
     @property
     def api_key(self) -> str | None:
         return self.lunit_fm_api_key.get_secret_value() if self.lunit_fm_api_key else None
+
+    @property
+    def embedded_api_key(self) -> str | None:
+        return embedded_main_api_key(self.submission_credential_source == "main")
 
     @property
     def chat_completions_url(self) -> str:

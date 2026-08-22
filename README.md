@@ -1,81 +1,222 @@
-# BraveTylenol bounded-L2 submission
+# BraveTylenol hybrid-default L2 + MCP submission
 
-CoEval의 OpenAI-compatible 요청을 받아 `Lunit/L2-preview`가 최종 답변을 생성하는
-해커톤 제출 서버입니다. 정적 의료 답변이나 외부 인터넷 API를 사용하지 않으며,
-L2 생성이 실패하면 CoEval이 재시도할 수 있도록 명시적인 오류를 반환합니다.
+`baseline/024-hybrid`의 동시성·지연시간 대조군을 바탕으로, 환경 설정이 없는 제출
+Docker에서는 고정밀 hybrid routing을 사용한다. 일반 질문은 Lunit L2 direct fast path로
+답하고, 근거 의존성이 명확한 질문만 공식 MCP Retrieval로 보낸다. 실제 Docker image는
+FastAPI `app.py`를 `uvicorn`으로 실행한다. `main.py`는 entrypoint가 아니지만, 주최 측이
+허용한 임시 제출 credential을 읽는 호환성 파일로 image에 함께 들어간다. 의료 답변과
+AGENT_MODE 동작은 모두 modular app이 담당한다. 저장소에는 `"fffffff"` placeholder만
+커밋하며 실제 제출 key는 사용자가 push 이후 직접 교체한다.
+
+핵심 목표는 두 가지다.
+
+- 일반 의료 질문과 응급 질문은 한 번의 L2 생성으로 빠르게 답한다.
+- KCD·MFDS·HIRA·법령·현행 지침·논문·명시적 출처 요청처럼 기억만으로 답하면 안 되는
+  질문은 제한된 MCP/RAG 경로로 보내되, MCP 지연이 최종 답변 시간을 잠식하지 않게 한다.
+
+어느 경로에서도 Python이 의료 답변을 합성하지 않는다. 사용자에게 반환되는 최종 의료
+텍스트는 Lunit L2가 작성한다.
 
 ## 평가 환경 계약
 
-- 저장소 루트의 `Dockerfile`로 실행
-- `0.0.0.0:8000`에서 수신
-- `GET /health`, `GET /healthz`, `GET /v1/models`
+Docker image는 다음 인터페이스를 제공한다.
+
+- `0.0.0.0:8000`
+- `GET /health`, `GET /healthz`, `GET /readyz`
+- `GET /v1/models`
 - `POST /v1/chat/completions`
-- 제출 model name: `team-chatbot`
-- `lunit_...` 형식의 `LUNIT_FM_API_KEY`가 유효한 요청 Bearer보다 우선
-- 일반 요청은 L2 1회이며 서버 내부 재시도 없음
-- 모든 요청은 외부 MCP 없이 L2를 정확히 1회 호출
-- upstream timeout 145초, 요청 전체 deadline 150초, queue wait 최대 5초
-- completion budget 최대 4,096 token, `reasoning_effort=low`, `temperature=0`
-- L2 outbound 동시 실행은 공식 CoEval 동시성과 같은 16개로 제한
-- 응답 본문은 4MB로 제한하며 slow body도 전체 deadline을 넘길 수 없음
-- L2 timeout, HTTP 오류, 빈 응답, 잘못된 JSON은 정적 답변으로 숨기지 않고
-  OpenAI 형태의 HTTP 424 오류로 반환
-- 잘못된 messages는 HTTP 400으로 반환
-- 모든 지원 응답에는 `X-Request-ID`를 부여하고 SIGTERM으로 정상 종료
-- Python 표준 라이브러리만 사용하며 빌드 중 `pip install` 없음
+- credential 우선순위는 형식이 유효한 환경 `LUNIT_FM_API_KEY`, image의 `main.py` 내장값,
+  형식이 유효한 요청 Bearer 순서
+- L2가 401/403을 반환한 경우에만 다음의 서로 다른 credential 후보를 한 번씩 사용하며,
+  같은 request의 Model과 MCP에 같은 후보를 전달
+- 환경 credential이 없는 evaluator bearer-only 실행도 `/readyz`에 형식상 유효한
+  `Authorization: Bearer ...`를 공급하면 static readiness 200
+- 유효한 credential이 없으면 process liveness는 유지하지만 `/readyz`와 chat은 503
+- 평가용 model ID `team-chatbot`과 upstream model ID `Lunit/L2-preview`
+- non-streaming OpenAI-compatible JSON completion
+- 모든 응답의 `X-Request-ID`
 
-## 답변 품질 전략
+요청 body 크기·JSON 깊이·중복 key·비유한 수·지원하지 않는 model/stream을 경계에서
+검증한다. Docker context는 `app.py`, `main.py`, `lunit_hackathon/`, `requirements.txt`만
+image에 복사하며 테스트·문서·canonical 원문은 실행 image에서 제외한다.
 
-- 전체 대화와 evaluator system context를 보존
-- 사용자 언어를 동적으로 재확인하되 명시적 언어 요청을 우선
-- 환자, 임상의, 데이터 계산, 의료 문서 작성 요청을 구분
-- 응급/당일/외래/자가관리 단계와 특수집단 위험을 문맥에 맞게 적용
-- 정확한 항목 수, heading, schema, 길이와 제공 사실만 사용하라는 지시를 재확인
-- 약 이름·제형·현재 계획이 없을 때 새 용량이나 복용 시점을 임의로 생성하지 않음
-- 최종 사용자 답변은 항상 L2가 작성
-- 검색이나 RAG 지연 없이 전체 대화를 한 번의 L2 생성에 전달
+CoEval 확장 입력을 위해 대화 선두의 `system`/`developer` context, `text`·`input_text`
+content part, `max_completion_tokens`와 무해한 metadata/sampling field를 수용한다. 호출자가
+준 system-like text는 compiled medical system 권한을 얻지 않고 명시적인 untrusted user
+context로 downgrade된다. Client가 보낸 tool/function protocol field와 tool message는 계속
+400으로 거절한다.
 
-## 실행
+## 기본 hybrid 라우팅과 direct override
 
-```bash
-python main.py serve
-```
+| 입력 유형 | hybrid 기본 경로 | direct override |
+| --- | --- | --- |
+| 일반 증상, 생활습관, 안정적인 건강 상식 | direct L2 1회 | 동일 |
+| 의식 저하·호흡 곤란·흉통·과량복용 등 응급 표현 | emergency L2 1회 | 검색 없이 동일 |
+| KCD/상병코드, MFDS 허가, HIRA 급여·약가·수가, 대한민국 법령 | MCP/RAG 후보 | direct L2 1회 |
+| 최신 지침·논문·연구 또는 명시적인 근거·출처·인용 요청 | MCP/RAG 후보 | direct L2 1회 |
 
-로컬에서는 실제 키를 소스에 추가하지 말고 프로세스 환경에 주입합니다.
+`hybrid`는 direct가 기본인 고정밀 routing이다. “최신”, “현재”, “출처” 같은 넓은 단어
+하나만으로 RAG를 강제하지 않으며 실제 근거 요청이나 승인된 행정·법률 영역과 결합된 경우에
+선택한다. 최근 두 사용자 turn만 routing 판단에 사용해 짧은 대명사 연결은 보존하면서 오래된
+대화의 키워드가 현재 질문을 불필요하게 RAG로 보내지 않게 한다.
 
-```bash
-export LUNIT_FM_API_KEY="lunit_..."
-python main.py serve
-```
+기본값은 `AGENT_MODE=hybrid`이며 위 source-dependent routing을 활성화한다.
+`AGENT_MODE=direct`는 MCP를 완전히 끄는 비교·복구 variant다. Hybrid와 forced RAG 모두 admission 4개가 이미
+사용 중이면 대기열을 만들지 않고 즉시 분기한다. 이 값은 환경 설정으로 낮출 수 있지만 4보다
+높일 수 없다. source-dependent 요청은 fresh
+`mcp_failure_final`로, 그 밖의 요청은 direct L2로 전환한다. `AGENT_MODE=rag`는 모든 정상
+질문에 Retrieval 도구를 노출하는 진단용, `AGENT_MODE=passthrough`는 검색 조정 없이 안전
+system prompt를 붙이는 진단용이다.
 
-```bash
-curl --max-time 2 http://127.0.0.1:8000/health
-curl --max-time 2 http://127.0.0.1:8000/v1/models
-curl --max-time 160 \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"team-chatbot","messages":[{"role":"user","content":"What should I do?"}]}' \
-  http://127.0.0.1:8000/v1/chat/completions
-```
+## 시간·동시성 예산
 
-## 테스트
+| 항목 | 기본값 | 역할 |
+| --- | ---: | --- |
+| 전체 요청 | 165초 | API 요청의 절대 상한 |
+| L2 generic/default attempt | 최대 145초 | direct·passthrough 및 단계별 override가 없는 model 호출 상한; 항상 남은 전체 요청 deadline 이하 |
+| L2 retry | 0회 | 재시도 꼬리 지연 제거 |
+| RAG initial application-tool | 25초 | retrieval query 생성 단계 |
+| forced-tool retry | 10초 | source-dependent 요청에서 tool call 누락 시 한 번만 강제 |
+| emergency final | 명목 최대 145초, 최대 2,048 tokens | 실제 network slice는 safe completion용 35초를 먼저 잠근 뒤 남은 시간으로 제한 |
+| Retrieval hard slice | 최대 45초, 매 단계 동적 재계산 | `min(50초, request × 0.31, 남은 deadline − final reserve)`로 MCP와 planner 격리 |
+| final reserve | 기본 120초 | Retrieval 시작 전에 반드시 남겨 두며, 짧은 비운영 deadline에서는 request의 75%로 축소 |
+| Retrieval planner L2 | attempt당 25초 | MCP call 계획과 local finalization 단계; 동적 Retrieval 상한 안에서 동작 |
+| final Generation | 명목 최대 145초, 최대 2,048 tokens | 각 network 호출은 safe completion 30초 + HTTP guard 5초를 잠그므로 최초 direct는 최대 130초 |
+| clean final recovery | 명목 최대 145초, 최대 2,048 tokens | 잠근 35초를 침범하지 않을 때만 fresh no-tool 재작성; 시간이 없으면 network 호출 없이 safe completion으로 진행 |
+| safe completion final | 최대 30초, 최대 256 tokens | fixed indicator만으로 생성하는 L2 한국어 안전 고지; 마지막 HTTP 정리 5초 보존, tool·retry 없음 |
+| RAG admission | 4개 (설정 가능 1~4) | slow multi-call 경로가 C16 direct/final 용량을 독점하지 못하도록 제한 |
+| MCP remote call | 기본 3회, release ceiling 3회 | 실제 호출은 도메인 ceiling 1~3회로 제한 |
+| L2 동시 호출 | 16개 | CoEval 동시성에 맞춘 upstream 보호 |
+| MCP 동시 연결 | 16개 | connection/session 점유 제한 |
+| 요청 completion 상한 | 최대 2,048 tokens | decision/planner는 1,536, 일반 final·복구·응급은 2,048, safe completion은 256으로 phase별 제한 |
 
-```bash
+각 phase timeout에는 model semaphore 대기시간도 포함된다. `tool_decision`의 출력은 사용자에게
+반환하지 않는다. `direct_final`, `post_retrieval_final`, `mcp_failure_final`, `emergency_final`은
+항상 frozen inbound와 해당 final context로 새 no-tool transcript를 만들고, 구조·finish reason·
+tool protocol·citation 검증에 실패하면 invalid draft를 포함하지 않은 `clean_recovery_final`을
+같은 absolute deadline 안에서 정확히 한 번 실행한다. Emergency final은 MCP를 호출하거나
+normal Retrieval route를 새로 시작하지 않는다. 이 no-evidence 응급 phase는 실제로 조회하지 않은
+최신·공식 출처·URL·학회·저널·법령을 확인했다고 단정하거나 새 경구약·구체 용량을 시작하라는
+출력을 거부한다. 출혈 안내는 지속 직접압박과 현지 응급번호·안전한 위치·dispatcher 지시를
+우선한다. Recovery도 invalid·malformed이거나 timeout이고 deadline이 남아 있으면 사용자 의료
+원문·이전 draft·tool/evidence를 전혀 넣지 않은 fixed indicator로 `safe_completion_final` L2를
+정확히 한 번 실행한다. 이 phase는 tool과 retry 없이 30초·256 tokens 안에서 한국어 1~2문장의
+진단 대체 불가·전문가 확인 고지(응급이면 즉시 현지 응급서비스 안내)를 생성한다. 이 출력도
+호출·검증에 실패할 때만 Python 의료 fallback 없이 sanitized upstream error로 종료한다.
+
+Model-facing `conversation-context-v4`와 `retrieval-evidence-v4` projection은 의미가 확인된
+필드만 보내는 sparse 형식이다. 선택적인 null·unknown·빈 문자열·빈 객체 같은 placeholder는
+생략하지만, 필수 status와 실제 evidence item은 유지한다. 필드 생략은 임상 사실의 부재나
+정상 상태를 뜻하지 않으며 frozen 사용자 원문과 evidence status를 바꾸지 않는다.
+
+MCP client 자체를 무기한 기다리게 두는 구조가 아니다. Discovery·planning·remote call 전체를
+최대 45초의 동적 Retrieval hard slice 안에 격리하고 final L2에 기본 120초를 남긴다. 초과·연결 실패·schema 오류는 검증된 실패 상태로
+단조 하향한다. 이후 frozen inbound와 failure context에서 fresh `mcp_failure_final` L2 request를
+만들어 출처를 찾았다고 가장하지 않는 최종 답변을 작성한다. Tool-decision·MCP transcript와 raw
+protocol은 이 final request나 사용자 출력에 포함하지 않는다. 따라서 MCP 장애가 user-visible
+end-to-end timeout으로 확대되는 경로를 줄인다.
+
+## MCP binding과 근거 처리
+
+이 프로그램은 MCP server가 아니라 대회 공식 MCP의 client/orchestrator다.
+
+1. 첫 RAG 요청에서 live tool discovery의 각 logical alias를 독립적으로 strict JSON schema와
+   대조한다. 누락·중복·drift·lossless projection 불가 alias만 격리하고 미검증 도구는 노출하지
+   않는다. 한 도메인과 무관한 도구 하나의 변화가 전체 MCP 경로를 중단시키지 않는다.
+2. 격리 후 검증된 binding registry는 process lifetime 동안 공유해 이후 요청의
+   discovery/compile 비용을 없앤다. 질문에 필요한 도메인 도구가 하나도 남지 않으면 그
+   route만 근거 없음으로 안전하게 종료한다. 같은 도메인의 일부 alias만 남으면 해당 alias만
+   설명하는 안전한 prompt fragment를 만들고, 빠진 후속 열람 단계의 결과는 final 근거로
+   과장하지 않는다.
+3. 각 query에는 KCD, MFDS, HIRA, 법령, ADR 또는 일반 guideline/research 중 관련된 최소
+   tool subset만 Retrieval L2에 노출한다.
+4. remote MCP call의 configured 기본값과 release artifact ceiling은 3이다. 실제 호출은
+   구조화 HIRA/ADR 1-hop, KCD·MFDS 최대 2-hop, guideline·research·법령 최대 3-hop의
+   도메인 ceiling으로 다시 제한하며, `finalize_retrieval`은 endpoint로 보내지 않는 local
+   finalizer다.
+5. 실제 tool result에서 관찰한 `cite_uid`만 선택하고 중복·크기·citation 범위를 검증한다.
+   근거가 없으면 UID나 출처를 합성하지 않는다.
+6. 최종 답변은 허용된 숫자형 citation만 사용할 수 있으며 검증 실패 시에도 Python이 답변을
+   고쳐 쓰지 않고 frozen inbound/context의 L2 clean recovery를 정확히 한 번 실행한다.
+
+## 자연어 입력 내성
+
+한국어 의료 질문은 완성된 문장일 필요가 없다. prompt artifact와 routing layer는 다음 입력을
+유효한 요청으로 다룬다.
+
+- 맞춤법·띄어쓰기·키보드/음성 전사 오류와 반복 문자
+- “머리아픔 어제부터 약 뭐먹지” 같은 단어 나열과 조사 생략
+- 목적어·시간·대상자가 앞뒤로 바뀐 문장 도치
+- 구어체·축약어·방언·이모지·한국어/영어 혼용
+- 여러 대상자, 시점 또는 질문이 섞인 입력
+
+원문은 보존하고 NFKC·공백 정리는 routing의 표면형 비교에만 사용한다. 약물·성분·제품,
+용량·농도·단위, 양성/음성, 신체 부위, 임신·연령·체중, 노출 물질처럼 위해를 바꾸는 오타는
+조용히 하나로 확정하지 않는다. 모호성이 결론이나 긴급도를 바꾸면 안전한 조건부 답변과 핵심
+확인 질문 1~3개를 우선한다. 응급 단어 나열·축약형은 별도 compact guard로 포착하되 과거
+증상·부정·인용을 현재 응급으로 단정하지 않도록 L2가 다시 판단한다.
+
+## KDCA ASP/KONAS 자료의 경계
+
+[KDCA 항생제 사용관리 자료 목록](https://www.kdca.go.kr/kdca/2857/subview.do?enc=Zm5jdDF8QEB8JTJGYmJzJTJGa2RjYSUyRjQ5JTJGYXJ0Y2xMaXN0LmRvJTNGcmdzQmduZGVTdHIlM0QlMjZjc3JmVG9rZW4lM0QzMDAzODA1ZS03MjNkLTRiMDktOTdjMy0wNjI3YTU2ODBhYTklMjZmaW5kT3Bud3JkJTNEJTI2ZmluZFdvcmQlM0QlMjZyZ3NFbmRkZVN0ciUzRCUyNmZpbmRUeXBlJTNEJTI2ZmluZENsU2VxJTNEJTI2cGFnZSUzRDElMjY%3D)과
+[KDCA 적정사용을 위한 각종 정책](https://www.kdca.go.kr/kdca/3515/subview.do)은 ASP 및
+KONAS 관련 source role을 정하는 정책 참고자료다. 기관 운영자료·집계·교육·시범사업을 개인
+환자의 항생제 필요성, 약제 선택, 용량 또는 기간 근거로 승격하지 않는 경계를 prompt에
+반영했다.
+
+다만 현재 release에는 KDCA 게시물·첨부를 runtime에서 검색하고 observed `cite_uid` ledger에
+등록하는 승인된 evidence adapter 또는 local snapshot이 없다. 위 URL은 자동 수집 대상도,
+MCP가 반환한 model-facing evidence도 아니다. 따라서 exact 게시물 내용이나 최신 운영 사실을
+조회했다고 주장하지 않으며, KDCA coverage가 필요한 질문은 확인된 공식 MCP 근거만 사용하고
+없으면 `coverage_gap`/`no_evidence`로 남긴다.
+
+## 공식 대회 문서
+
+구현·제출 시 다음 Dashboard 계약을 우선한다.
+
+- [Lunit FM quick start](https://dashboard.hackathon.lunit.io/quick-start/lunit-fm)
+- [MCP tools quick start](https://dashboard.hackathon.lunit.io/quick-start/mcp-tools)
+- [Rules](https://dashboard.hackathon.lunit.io/rules)
+- [Model quick start](https://dashboard.hackathon.lunit.io/quick-start/model)
+
+Dashboard tool schema 또는 규칙이 바뀌면 canonical source, compiled runtime artifact, binding
+manifest와 테스트를 같은 변경으로 갱신해야 한다.
+
+## 실행과 검증
+
+~~~bash
+python -m uvicorn app:app --host 0.0.0.0 --port 8000 --no-access-log
+~~~
+
+~~~bash
+docker build -t brave-tylenol-hybrid .
+docker run --rm -p 8000:8000 brave-tylenol-hybrid
+~~~
+
+~~~bash
 python -m pytest -q
-python -m ruff check .
-```
+python scripts/compile_runtime_artifacts.py --check
+~~~
 
-Docker가 있는 환경에서는 실제 제출 이미지로 확인합니다.
+`GET /health`는 process liveness만 확인한다. `GET /readyz`는 local artifact·공식 endpoint 설정과
+형식상 유효한 환경, packaged `main.py`, 또는 request Bearer credential 존재를 확인하지만 외부
+L2/MCP를 미리 호출하지 않는다. 따라서 packaged credential이 유효하면 header 없이도 readiness
+200이며, 그것이 없더라도 evaluator bearer-only 실행은 유효한 Bearer header를 함께 보내면
+readiness 200이다. 어느 credential도 없으면 기동·liveness만 성공하고 readiness/chat은 503이다.
+실제 Lunit network에서 제출 전 live canary를 별도로 실행해야 한다.
 
-```bash
-docker build -t brave-tylenol-submission .
-docker run --rm -p 8000:8000 brave-tylenol-submission
-```
+## 벤치마크 해석
 
-## 시간 목표와 제한
+[2026-08-21 L2 authentication local performance gate](docs/benchmarks/2026-08-21-l2-auth-local.md)는
+`baseline/024-hybrid`가 계승한 direct-only 대조군의 16동시 요청 기록이다. 첫 측정은 16/16
+실 L2 응답, 중앙 25.965초, 최대 30.317초였고 별도 evaluator simulation도 문서에 그대로
+보존되어 있다. 이 기록은 L2 연결·동시성·지연시간 gate이지 현재 MCP 경로의 품질 또는 공식
+HealthBench 점수가 아니다.
 
-공식 전체 평가 시간에는 답변 생성뿐 아니라 rubric judging도 포함되므로 로컬 서버가
-전체 시간을 단독으로 보장할 수는 없습니다. 서버 내부 재시도를 제거하고 동시성을
-16으로 제한해 중복 호출과 과부하를 막았습니다. 모든 요청의 L2 생성을 1회로
-제한해 30분 목표에 맞췄습니다.
-제출 전에는 실제 Docker 이미지로 health, models, chat completion 및 동시 요청을
-확인해야 합니다.
+[2026-08-22 live MCP paired promotion decision](docs/benchmarks/2026-08-22-live-mcp-paired-no-go.md)은
+고정 synthetic 의료 질문의 실제 L2/MCP 비교 결과다. 유효 retrieval 6쌍에서 hybrid가
+32점, direct가 34점이었고 평균 지연은 각각 41.5초와 20.2초였다. 별도 응급·특이 13쌍은
+총점이 102 대 101이었지만 assistant-history topic-switch 안전성 회귀가 있어 전체 gate를
+통과하지 못했다. 실험 자체의 promotion 판정은 NO-GO였지만, 최종 제출 지시에 따라 이 후속
+commit은 hybrid를 기본값으로 선택한다. 안전한 call budget과 direct fast path는 그대로
+유지하며 `AGENT_MODE=direct`로 즉시 MCP를 끌 수 있다.
