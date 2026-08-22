@@ -50,7 +50,7 @@ async def test_complete_calls_l2_chat_completions(monkeypatch):
     assert seen["body"] == {
         "model": "Lunit/L2-preview",
         "messages": [{"role": "user", "content": "테스트"}],
-        "max_tokens": 4096,
+        "max_tokens": 2048,
         "reasoning_effort": "low",
         "temperature": 0.0,
     }

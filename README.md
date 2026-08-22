@@ -80,14 +80,14 @@ system prompt를 붙이는 진단용이다.
 | Retrieval hard slice | 최대 45초, 매 단계 동적 재계산 | `min(50초, request × 0.31, 남은 deadline − final reserve)`로 MCP와 planner 격리 |
 | final reserve | 기본 120초 | Retrieval 시작 전에 반드시 남겨 두며, 짧은 비운영 deadline에서는 request의 75%로 축소 |
 | Retrieval planner L2 | attempt당 25초 | MCP call 계획과 local finalization 단계; 동적 Retrieval 상한 안에서 동작 |
-| final Generation | 최대 145초, 최대 4,096 tokens | evidence/no-evidence 이후 사용자 답변; 남은 전체 요청 deadline 적용 |
-| clean final recovery | 최대 145초, 최대 4,096 tokens | final 검증 실패 또는 최초 final timeout 시 남은 전체 요청 deadline 안의 fresh no-tool 재작성 |
+| final Generation | 최대 145초, 최대 2,048 tokens | evidence/no-evidence 이후 사용자 답변; 남은 전체 요청 deadline 적용 |
+| clean final recovery | 최대 145초, 최대 2,048 tokens | final 검증 실패 또는 최초 final timeout 시 남은 전체 요청 deadline 안의 fresh no-tool 재작성 |
 | safe completion final | 최대 30초, 최대 256 tokens | initial final과 clean recovery가 모두 실패하고 deadline이 남은 경우 fixed indicator만으로 생성하는 L2 한국어 안전 고지; tool·retry 없음 |
 | RAG admission | 16개 | 공식 C16 cohort를 수용하고 초과 요청은 즉시 하향 |
 | MCP remote call | 기본 3회, release ceiling 3회 | 실제 호출은 도메인 ceiling 1~3회로 제한 |
 | L2 동시 호출 | 16개 | CoEval 동시성에 맞춘 upstream 보호 |
 | MCP 동시 연결 | 16개 | connection/session 점유 제한 |
-| 요청 completion 상한 | 최대 4,096 tokens | decision/planner는 1,536, 일반 final·복구는 4,096, 응급은 2,048, safe completion은 256으로 phase별 제한 |
+| 요청 completion 상한 | 최대 2,048 tokens | decision/planner는 1,536, 일반 final·복구·응급은 2,048, safe completion은 256으로 phase별 제한 |
 
 각 phase timeout에는 model semaphore 대기시간도 포함된다. `tool_decision`의 출력은 사용자에게
 반환하지 않는다. `direct_final`, `post_retrieval_final`, `mcp_failure_final`, `emergency_final`은

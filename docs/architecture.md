@@ -187,8 +187,8 @@ Configured 값은 artifact ceiling과 domain ceiling을 넘지 못하며 `AGENT_
 | retrieval hard slice | 최대 45초, 매 단계 동적 재계산 | `min(50초, request × 0.31, 남은 deadline − final reserve)`로 MCP와 planner 격리 |
 | final reserve | 기본 120초 | Retrieval 전 반드시 보존; 짧은 비운영 deadline에서는 request의 75% |
 | retrieval planner L2 | attempt당 25초 | remote call 계획 및 local finalization; 동적 Retrieval 상한 적용 |
-| final Generation | 최대 145초, 최대 4,096 tokens | evidence/no-evidence 뒤 사용자 답변; 남은 전체 요청 deadline 적용 |
-| clean final recovery | 최대 145초, 최대 4,096 tokens | 남은 전체 요청 deadline 안에서 plain text·종료 사유·인용 invariant 재생성 또는 최초 final timeout 복구, 정확히 1회 |
+| final Generation | 최대 145초, 최대 2,048 tokens | evidence/no-evidence 뒤 사용자 답변; 남은 전체 요청 deadline 적용 |
+| clean final recovery | 최대 145초, 최대 2,048 tokens | 남은 전체 요청 deadline 안에서 plain text·종료 사유·인용 invariant 재생성 또는 최초 final timeout 복구, 정확히 1회 |
 | safe completion final | 최대 30초, 최대 256 tokens | initial final과 recovery가 모두 실패하고 deadline이 남은 경우 fixed indicator만으로 한국어 1~2문장 생성; tool·retry 없음 |
 | RAG admission | 16 | 공식 C16 cohort를 수용하고 초과 요청은 즉시 하향 |
 | MCP call | configured 기본 3, effective ceiling 1~3 | artifact·설정·도메인 중 최솟값으로 tool loop 상한 |
@@ -218,7 +218,7 @@ RAG가 시작된 뒤 Retrieval 실패 시 일반 direct prompt로 몰래 전환�
 
 - `POST /v1/chat/completions`의 `model`은 생략할 수 있다.
 - `GET /v1/models`는 `team-chatbot`과 `Lunit/L2-preview`를 반환한다.
-- 선택적인 `max_tokens`/`max_completion_tokens`는 서버 상한 4,096을 늘릴 수 없다.
+- 선택적인 `max_tokens`/`max_completion_tokens`는 서버 상한 2,048을 늘릴 수 없다.
 - 대화 선두의 `system`/`developer`, `text`·`input_text` content part와 허용된
   metadata/sampling field는 CoEval 호환 입력으로 받는다.
 - 호출자 제공 system-like text는 untrusted user context로 downgrade하며 compiled medical

@@ -65,7 +65,7 @@ class Settings(BaseSettings):
         validation_alias="L2_RETRY_ATTEMPTS",
     )
     max_completion_tokens: int = Field(
-        default=4_096,
+        default=2_048,
         ge=512,
         le=6_144,
         validation_alias="MAX_COMPLETION_TOKENS",

@@ -64,7 +64,7 @@ def test_generation_prompt_preserves_complete_context_aware_answer_contract():
     assert "안전하게 답할 부분과 조건부 행동을 먼저" in prompt
     assert "red flag는 관련 있을 때만" in prompt
     assert "무관한 면책문구, 일반적 red flag 목록" in prompt
-    assert "약 700 output token 이내의 완결된 답변" in prompt
+    assert "약 500 output token 이내의 완결된 답변" in prompt
     assert "마지막 질문과 문장을 완성할 여유" in prompt
     assert "사용자가 명시한 전문성" in prompt
     assert "언어만으로 위치·관할·의료 접근성을 추정하지 않는다" in prompt

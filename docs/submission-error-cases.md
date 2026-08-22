@@ -66,8 +66,10 @@ Use this checklist before promoting a submission commit.
   The official L2 returned a compact direct medical answer with `stop` only after
   about 104 seconds; 45-second phase limits caused systematic 504 responses, and
   a 1,024-token attempt completed late with `length` rather than a usable final.
-- Keep the release final/emergency attempt ceiling at 145 seconds and the regular
-  output ceiling at 4,096 until a paired live gate proves a smaller setting.
+- Keep the release final/emergency attempt ceiling at 145 seconds. The current
+  final candidate lowers the regular final/recovery ceiling to 2,048, matching
+  the emergency output ceiling; re-check nonempty, `stop`, and quality
+  before promotion rather than reducing the timeout to manufacture faster errors.
   Retrieval is optional and must preserve the configured final-answer reserve;
   successful MCP transport followed by a starved final is still a failed request.
 - Validate direct, emergency, MCP-success, and MCP-failure paths separately.
@@ -107,6 +109,11 @@ Use this checklist before promoting a submission commit.
   Null, empty, and constant audit placeholders may be omitted while preserving
   raw dialogue, uncertainty state, evidence status, citation mapping, and
   material limitations.
+- The current fast candidate changes the regular hard cap from 4,096 to 2,048
+  and the default answer target from about 700 to 500 output tokens. Emergency
+  remains 2,048 and decision/retrieval remains 1,536. Treat the percentage
+  reductions as configuration changes, not a latency claim, until the same
+  direct/RAG prompts are remeasured on the exact image.
 
 ## Approved official-network validation
 

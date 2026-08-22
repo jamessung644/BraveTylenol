@@ -309,7 +309,7 @@ async def test_generation_returns_direct_l2_text_with_only_official_application_
     ]
     assert l2.calls[0]["tools"][0]["function"]["strict"] is True
     assert "tools" not in l2.calls[1]
-    assert l2.calls[1]["max_tokens"] == 4_096
+    assert l2.calls[1]["max_tokens"] == 2_048
     assert "retrieve_relevant_content" not in l2.calls[1]["messages"][0]["content"]
     assert l2.calls[1]["messages"][0]["content"] != (
         l2.calls[0]["messages"][0]["content"]
@@ -343,7 +343,7 @@ async def test_generation_retrieves_then_resumes_same_trajectory_without_more_to
     assert retrieval.queries == ["공식 진료지침 목표 혈압은?"]
     assert l2.calls[0]["attempt_timeout_seconds"] == 25
     assert l2.calls[1]["attempt_timeout_seconds"] == 145
-    assert l2.calls[1]["max_tokens"] == 4_096
+    assert l2.calls[1]["max_tokens"] == 2_048
     assert l2.calls[1]["allow_blank_recovery"] is False
     assert "tools" not in l2.calls[1]
     assert "tool_choice" not in l2.calls[1]
@@ -1475,7 +1475,7 @@ async def test_emergency_unsafe_decontamination_advice_gets_fresh_recovery():
     assert answer == safe
     assert len(l2.calls) == 2
     assert unsafe not in json.dumps(l2.calls[1]["messages"], ensure_ascii=False)
-    assert [call["max_tokens"] for call in l2.calls] == [2_048, 4_096]
+    assert [call["max_tokens"] for call in l2.calls] == [2_048, 2_048]
 
 
 async def test_emergency_unsafe_decontamination_advice_twice_fails_closed():
@@ -1838,7 +1838,7 @@ async def test_generation_requests_l2_correction_when_numeric_citation_is_missin
     assert answer == "교정된 답변 [1]"
     assert "tools" not in l2.calls[2]
     assert l2.calls[2]["attempt_timeout_seconds"] == 145
-    assert l2.calls[2]["max_tokens"] == 4_096
+    assert l2.calls[2]["max_tokens"] == 2_048
     assert l2.calls[2]["allow_blank_recovery"] is False
 
 
@@ -1865,7 +1865,7 @@ async def test_repeated_citation_omission_returns_only_the_recovered_l2_text():
 
     assert answer == "새로 작성한 KCD 코드 설명도 숫자 인용은 없음"
     assert len(l2.calls) == 3
-    assert l2.calls[2]["max_tokens"] == 4_096
+    assert l2.calls[2]["max_tokens"] == 2_048
 
 
 async def test_generation_rejects_answer_after_failed_citation_correction():
@@ -2073,8 +2073,8 @@ async def test_initial_final_timeout_gets_one_fresh_bounded_recovery():
 
     assert answer == "복구된 최종 답변"
     assert [call["attempt_timeout_seconds"] for call in l2.calls] == [145, 145]
-    assert l2.calls[0]["max_tokens"] == 4_096
-    assert l2.calls[1]["max_tokens"] == 4_096
+    assert l2.calls[0]["max_tokens"] == 2_048
+    assert l2.calls[1]["max_tokens"] == 2_048
     assert l2.calls[1]["allow_blank_recovery"] is False
     assert len(l2.calls[1]["messages"]) == 2
     assert "재작성 단계" in l2.calls[1]["messages"][0]["content"]
@@ -2129,7 +2129,7 @@ async def test_nonstop_finish_reason_uses_exactly_one_clean_recovery():
 
     assert answer == "완결된 사용자 답"
     assert len(l2.calls) == 2
-    assert [call["max_tokens"] for call in l2.calls] == [4_096, 4_096]
+    assert [call["max_tokens"] for call in l2.calls] == [2_048, 2_048]
     assert "중간에 끊긴 답" not in json.dumps(l2.calls[1]["messages"], ensure_ascii=False)
 
 
@@ -2147,7 +2147,7 @@ async def test_nonstop_finish_reason_twice_fails_closed():
         )
 
     assert len(l2.calls) == 2
-    assert [call["max_tokens"] for call in l2.calls] == [4_096, 4_096]
+    assert [call["max_tokens"] for call in l2.calls] == [2_048, 2_048]
 
 
 @pytest.mark.parametrize(

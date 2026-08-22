@@ -429,7 +429,7 @@ async def test_default_hybrid_mode_requires_mcp_for_official_label_question(monk
 
 @pytest.mark.parametrize(
     ("requested_max_tokens", "expected_max_tokens"),
-    [(700, 700), (5_000, 4_096)],
+    [(700, 700), (5_000, 2_048)],
 )
 async def test_chat_applies_requested_max_tokens_with_server_cap(
     monkeypatch,

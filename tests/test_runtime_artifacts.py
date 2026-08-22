@@ -423,7 +423,7 @@ def test_all_final_phase_prompts_share_healthbench_aligned_answer_policy():
         "red flag는 관련 있을 때만",
         "무관한 면책문구, 일반적 red flag 목록",
         "간결한 종료:",
-        "약 700 output token 이내의 완결된 답변",
+        "약 500 output token 이내의 완결된 답변",
         "마지막 질문과 문장을 완성할 여유",
         "요청 항목과 필요한 행동·한계·인용을 모두 다루면 즉시 끝낸다",
         "소통:",
