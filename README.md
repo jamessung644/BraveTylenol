@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/brand/brave-tylenol-logo.png" width="320" alt="Brave Tylenol medical capsule character">
+  <img src="assets/brand/brave-tylenol-logo-glossy.png" width="160" alt="Brave Tylenol glossy medical capsule character">
 </p>
 
 <h1 align="center">Brave Tylenol</h1>
