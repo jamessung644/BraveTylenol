@@ -41,9 +41,7 @@ MCP 의료 데이터 소스를 제한적으로 조회합니다.
 ## 참가 대회
 
 <p align="center">
-  <a href="https://www.lunit.io/">
-    <img src="assets/brand/lunit-logo.svg" height="45" alt="Lunit logo">
-  </a>
+  <img src="assets/brand/event-organizers.png" width="760" alt="Lunit, RnDcircle, D.CIRCLE, NIPA, 과학기술정보통신부 로고">
 </p>
 
 | 항목 | 내용 |
@@ -61,7 +59,8 @@ Brave Tylenol은 이 과제에 제출한 팀 프로젝트입니다.
 
 > **브랜드 안내:** Lunit 명칭과 로고는 대회 주최 및 참가 이력을 식별하기 위해 표시했습니다.
 > Brave Tylenol은 해커톤 참가 프로젝트이며, 루닛의 공식 제품이나 의료기기가 아닙니다.
-> 로고 출처: [Lunit Media Center](https://www.lunit.io/en/media-center/).
+> 기관 정보: [Lunit](https://www.lunit.io/), [RnDcircle · D.CIRCLE](https://www.rndcircle.io/about),
+> [NIPA](https://www.nipa.kr/), [과학기술정보통신부](https://www.msit.go.kr/contents/cont.do?mId=141&mPid=131&sCode=user).
 
 ## 구현 결과
 
