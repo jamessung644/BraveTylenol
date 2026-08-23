@@ -31,12 +31,12 @@ MCP 의료 데이터 소스를 제한적으로 조회합니다.
 <p align="center">
   <a href="assets/demo/brave-tylenol-demo.mp4">▶ 데모 영상 재생 (MP4, 약 51초)</a>
   &nbsp;·&nbsp;
-  <a href="docs/showcase/BraveTylenol-presentation.pdf">📄 발표 자료 PDF 보기</a>
+  <a href="https://docs.google.com/presentation/d/1rICx_cDFxf863MX6q9E-pxSwwL0X2tCBm0irn_BE6cQ/edit?usp=sharing">📊 발표 자료 Google Slides 보기</a>
 </p>
 
 같은 HealthBench 의료 질문을 OpenAI와 BraveTylenol에 동시에 보내고, GPT judge가
 정확성·상세성·안전성을 비교하는 로컬 데모입니다. 위 스크린샷을 누르면 전체 시연 영상을
-볼 수 있으며, 발표 자료는 별도의 GitHub PDF 뷰어에서 열립니다.
+볼 수 있으며, 발표 자료는 Google Slides에서 열립니다.
 
 ## 참가 대회
 
@@ -168,9 +168,7 @@ python -m ruff check .
 ├── main.py                         # 실제 제출용 OpenAI-compatible 서버
 ├── Dockerfile                      # 격리 평가용 최소 런타임 이미지
 ├── tests/                          # API·L2·MCP·오케스트레이션 회귀 테스트
-├── docs/
-│   ├── benchmarks/                 # 아키텍처와 성능 검증 기록
-│   └── showcase/                   # 발표 자료 PDF
+├── docs/benchmarks/                # 아키텍처와 성능 검증 기록
 └── assets/
     ├── brand/                      # Brave Tylenol 및 Lunit 브랜드 자산
     └── demo/                       # 비교 화면과 시연 영상
